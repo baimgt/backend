@@ -1807,19 +1807,16 @@ function initSocketIO(io) {
           else guestBalance -= betAmount;
         }
 
-        // Weighted symbol picker
+        // Weighted symbol picker (ONLY symbols 0-7 from user-provided images)
         const weights = [
-          { sym: 0, weight: 2 },   // Dragon
-          { sym: 1, weight: 3 },   // Phoenix
-          { sym: 2, weight: 4 },   // Tiger
-          { sym: 3, weight: 5 },   // Turtle
-          { sym: 4, weight: 6 },   // Carp
-          { sym: 5, weight: 12 },  // A
-          { sym: 6, weight: 15 },  // K
-          { sym: 7, weight: 18 },  // Q
-          { sym: 8, weight: 20 },  // J
-          { sym: 9, weight: 5 },   // Wild
-          { sym: 10, weight: 10 }  // Coin
+          { sym: 0, weight: 3 },   // Dragon (Naga)
+          { sym: 1, weight: 4 },   // Phoenix (Burung Hong)
+          { sym: 2, weight: 5 },   // Tiger (Macan)
+          { sym: 3, weight: 6 },   // Turtle (Penyu)
+          { sym: 4, weight: 8 },   // Carp (Ikan Emas)
+          { sym: 5, weight: 15 },  // A
+          { sym: 6, weight: 18 },  // K
+          { sym: 7, weight: 20 },  // Q
         ];
         
         const totalWeight = weights.reduce((acc, curr) => acc + curr.weight, 0);
@@ -1834,16 +1831,11 @@ function initSocketIO(io) {
 
         const ROWS = 3, COLS = 5;
         const grid = [];
-        let wildCount = 0;
-        let coinCount = 0;
 
         for (let r = 0; r < ROWS; r++) {
           const row = [];
           for (let c = 0; c < COLS; c++) {
-            const sym = pickSym();
-            if (sym === 9) wildCount++;
-            if (sym === 10) coinCount++;
-            row.push(sym);
+            row.push(pickSym());
           }
           grid.push(row);
         }
@@ -1858,15 +1850,14 @@ function initSocketIO(io) {
           5: { 5: 50,   4: 15,  3: 5 },  // A
           6: { 5: 40,   4: 10,  3: 4 },  // K
           7: { 5: 30,   4: 8,   3: 3 },  // Q
-          8: { 5: 20,   4: 5,   3: 2 },  // J
         };
 
         let totalWinAmount = 0;
         const winningSymbols = [];
         const baseBetUnit = Math.max(1, Math.floor(betAmount / 88));
 
-        // Calculate 243 Ways for each symbol (0 to 8)
-        for (let targetSym = 0; targetSym <= 8; targetSym++) {
+        // Calculate 243 Ways for each symbol (0 to 7)
+        for (let targetSym = 0; targetSym <= 7; targetSym++) {
           let ways = 1;
           let consecutiveCols = 0;
 
@@ -1874,7 +1865,7 @@ function initSocketIO(io) {
             let countInCol = 0;
             for (let r = 0; r < ROWS; r++) {
               const cellSym = grid[r][c];
-              if (cellSym === targetSym || cellSym === 9) { // 9 is Wild
+              if (cellSym === targetSym) {
                 countInCol++;
               }
             }
@@ -1897,12 +1888,12 @@ function initSocketIO(io) {
           }
         }
 
-        // Jackpot trigger chance (if Wilds appeared)
+        // Jackpot trigger chance (random 2% chance on spin)
         let triggerJackpot = false;
         let jackpotType = 'MINI';
         let jackpotWinAmount = 0;
 
-        if (wildCount > 0 && Math.random() < 0.15) { // 15% chance on Wild
+        if (Math.random() < 0.02) {
           triggerJackpot = true;
           const jpRand = Math.random();
           if (jpRand < 0.05) { jackpotType = 'GRAND'; jackpotWinAmount = betAmount * 5000; }
@@ -1912,8 +1903,8 @@ function initSocketIO(io) {
           totalWinAmount += jackpotWinAmount;
         }
 
-        // Free Spins Trigger (6+ Jin Ji Coins)
-        let triggerFreeSpins = coinCount >= 6;
+        // Free Spins Trigger (random 2.5% chance or big Dragon hit)
+        let triggerFreeSpins = Math.random() < 0.025;
         let freeSpinsAwarded = triggerFreeSpins ? 8 : 0;
 
         user && (user.coins += Math.floor(totalWinAmount));
