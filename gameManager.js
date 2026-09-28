@@ -980,6 +980,8 @@ function initSocketIO(io) {
       if (username) {
         socket.username = username;
         userSockets.set(username, socket.id);
+        // Broadcast updated online list to all connected clients
+        io.emit('online-users-update', { onlineUsers: Array.from(userSockets.keys()) });
       }
     });
 
@@ -1197,6 +1199,12 @@ function initSocketIO(io) {
     socket.on('disconnect', () => {
       console.log('Player disconnected:', socket.id);
 
+      // Remove from online registry
+      if (socket.username) {
+        userSockets.delete(socket.username);
+        io.emit('online-users-update', { onlineUsers: Array.from(userSockets.keys()) });
+      }
+
       // Check waiting rooms
       for (const [key, room] of waitingRooms) {
         room.removePlayer(socket.id);
@@ -1209,6 +1217,13 @@ function initSocketIO(io) {
       for (const [gameId, game] of activeGames) {
         game.handlePlayerLeave(socket.id);
       }
+    });
+
+    // Get list of online friends
+    socket.on('get-online-friends', ({ friendUsernames }) => {
+      const onlineList = Array.from(userSockets.keys());
+      const onlineFriends = (friendUsernames || []).filter(f => onlineList.includes(f));
+      socket.emit('online-friends-result', { onlineFriends, allOnline: onlineList });
     });
 
     // =====================================================
@@ -1779,6 +1794,66 @@ function initSocketIO(io) {
       } catch (err) {
         console.error('Fafafa error:', err);
         socket.emit('fafafa_error', { message: 'Terjadi kesalahan server' });
+      }
+    });
+
+    // =====================================================
+    // 5 LIONS MEGAWAYS (五獅 MEGAWAYS) SLOT LOGIC
+    // =====================================================
+    socket.on('spin_fivelions', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
+      try {
+        let user = await User.findOne({ username });
+        let isGuestMode = false;
+        let guestBalance = clientBalance || 6000000;
+
+        if (!user) {
+          isGuestMode = true;
+          if (guestBalance < betAmount && !isFreeSpins) {
+            return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
+          }
+        } else {
+          if (user.coins < betAmount && !isFreeSpins) {
+            return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
+          }
+        }
+
+        if (!isFreeSpins) {
+          if (user) user.coins -= betAmount;
+          else guestBalance -= betAmount;
+        }
+
+        // Generate 6x3 grid
+        const grid = [];
+        let scatterCount = 0;
+        for (let r = 0; r < 3; r++) {
+          const row = [];
+          for (let c = 0; c < 6; c++) {
+            const sym = Math.floor(Math.random() * 12);
+            if (sym === 6) scatterCount++;
+            row.push(sym);
+          }
+          grid.push(row);
+        }
+
+        // Calculate win amount
+        const isWin = Math.random() > 0.45;
+        let totalWinAmount = isWin ? Math.floor(betAmount * (1.5 + Math.random() * 5)) : 0;
+
+        if (user) user.coins += totalWinAmount;
+        if (!isGuestMode && user) await user.save();
+
+        const newBalance = isGuestMode ? guestBalance + totalWinAmount : user.coins;
+
+        socket.emit('fivelions_result', {
+          grid,
+          totalWinAmount,
+          triggerFreeSpins: scatterCount >= 3,
+          scatterCount,
+          newBalance
+        });
+      } catch (err) {
+        console.error('5 Lions error:', err);
+        socket.emit('fivelions_error', { message: 'Terjadi kesalahan server' });
       }
     });
 
