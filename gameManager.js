@@ -1200,7 +1200,7 @@ function initSocketIO(io) {
       console.log('Player disconnected:', socket.id);
 
       // Remove from online registry
-      if (socket.username) {
+      if (socket.username && userSockets.get(socket.username) === socket.id) {
         userSockets.delete(socket.username);
         io.emit('online-users-update', { onlineUsers: Array.from(userSockets.keys()) });
       }
