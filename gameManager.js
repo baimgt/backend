@@ -1,4 +1,4 @@
-// =====================================================
+  // =====================================================
 // GAME MANAGER — Server-side game state & matchmaking
 // =====================================================
 const User = require('./models/User');
@@ -968,6 +968,11 @@ function generate6DigitCode() {
 // User socket registry
 const userSockets = new Map();
 
+// By One (1v1) Matchmaking & Active Matches
+const byoneQueues = new Map();
+const byoneMatches = new Map();
+const byoneRooms = new Map();
+
 // =====================================================
 // SOCKET.IO EVENT HANDLER
 // =====================================================
@@ -1216,6 +1221,13 @@ function initSocketIO(io) {
       // Check active games
       for (const [gameId, game] of activeGames) {
         game.handlePlayerLeave(socket.id);
+      }
+
+      // Cleanup By One queues
+      for (const [key, q] of byoneQueues) {
+        if (q.socketId === socket.id) {
+          byoneQueues.delete(key);
+        }
       }
     });
 
@@ -2496,6 +2508,380 @@ function initSocketIO(io) {
       } catch (err) {
         console.error('Candy Rush error:', err);
         socket.emit('candy_error', { message: 'Server error' });
+      }
+    });
+
+    // =====================================================
+    // GLOBAL CHAT
+    // =====================================================
+    socket.on('join_global_chat', () => {
+      // Chat rooms can just be a global broadcast, no need to join a specific room for now
+      // Or we can join 'global_chat' room
+      socket.join('global_chat');
+    });
+
+    socket.on('send_global_msg', async (data) => {
+      // data: { username, message }
+      if (!data.username || !data.message) return;
+      
+      try {
+        const user = await User.findOne({ username: data.username });
+        const avatar = user ? user.avatar : '/bg.png';
+        const vipLevel = user ? user.vipLevel : 0;
+        
+        io.to('global_chat').emit('receive_global_msg', {
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+          username: data.username,
+          avatar: avatar,
+          vipLevel: vipLevel,
+          message: data.message,
+          timestamp: new Date().toISOString()
+        });
+      } catch (err) {
+        console.error('Error sending global msg:', err);
+      }
+    });
+
+    // =====================================================
+    // BY ONE (1V1) ADU TARUHAN HANDLERS
+    // =====================================================
+    socket.on('byone_create_custom_room', async ({ username, mode, betAmount }) => {
+      try {
+        const bet = parseInt(betAmount, 10) || 100000;
+        const user = await User.findOne({ username });
+        if (!user || user.coins < bet) {
+          socket.emit('byone_room_error', { message: `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.` });
+          return;
+        }
+
+        let code = Math.floor(100000 + Math.random() * 900000).toString();
+        while (byoneRooms.has(code)) {
+          code = Math.floor(100000 + Math.random() * 900000).toString();
+        }
+
+        const roomData = {
+          code,
+          hostUsername: username,
+          hostSocketId: socket.id,
+          hostAvatar: user.avatar,
+          hostVip: user.vipLevel,
+          guestUsername: null,
+          guestSocketId: null,
+          guestAvatar: null,
+          guestVip: 0,
+          mode: mode || 'domino',
+          betAmount: bet,
+          pot: bet * 2,
+          createdAt: Date.now()
+        };
+
+        byoneRooms.set(code, roomData);
+        socket.join(`byone_room_${code}`);
+        socket.emit('byone_custom_room_created', { code, room: roomData });
+      } catch (err) {
+        console.error('byone_create_custom_room error:', err);
+        socket.emit('byone_room_error', { message: 'Gagal membuat room By One.' });
+      }
+    });
+
+    socket.on('byone_join_custom_room', async ({ username, code }) => {
+      try {
+        const roomData = byoneRooms.get(code);
+        if (!roomData) {
+          socket.emit('byone_room_error', { message: `Kode Kamar #${code} tidak ditemukan atau sudah ditutup.` });
+          return;
+        }
+        if (roomData.hostUsername === username) {
+          socket.emit('byone_room_error', { message: 'Anda adalah pembuat kamar ini.' });
+          return;
+        }
+        if (roomData.guestUsername) {
+          socket.emit('byone_room_error', { message: `Kamar #${code} sudah penuh (2/2).` });
+          return;
+        }
+
+        const [hostUser, guestUser] = await Promise.all([
+          User.findOne({ username: roomData.hostUsername }),
+          User.findOne({ username })
+        ]);
+
+        if (!guestUser || guestUser.coins < roomData.betAmount) {
+          socket.emit('byone_room_error', { message: `Koin Anda tidak cukup! Butuh minimal ${roomData.betAmount.toLocaleString('id-ID')} koin.` });
+          return;
+        }
+        if (!hostUser || hostUser.coins < roomData.betAmount) {
+          socket.emit('byone_room_error', { message: 'Koin pembuat kamar tidak cukup untuk memulai duel.' });
+          return;
+        }
+
+        hostUser.coins -= roomData.betAmount; await hostUser.save();
+        guestUser.coins -= roomData.betAmount; await guestUser.save();
+
+        roomData.guestUsername = username;
+        roomData.guestSocketId = socket.id;
+        roomData.guestAvatar = guestUser.avatar;
+        roomData.guestVip = guestUser.vipLevel;
+
+        socket.join(`byone_room_${code}`);
+
+        io.to(`byone_room_${code}`).emit('byone_room_duel_start', {
+          code,
+          mode: roomData.mode,
+          betAmount: roomData.betAmount,
+          pot: roomData.pot,
+          player1: { username: roomData.hostUsername, avatar: roomData.hostAvatar, vipLevel: roomData.hostVip, coins: hostUser.coins },
+          player2: { username: guestUser.username, avatar: guestUser.avatar, vipLevel: guestUser.vipLevel, coins: guestUser.coins }
+        });
+
+        byoneRooms.delete(code);
+      } catch (err) {
+        console.error('byone_join_custom_room error:', err);
+        socket.emit('byone_room_error', { message: 'Gagal bergabung ke kamar.' });
+      }
+    });
+
+    socket.on('byone_cancel_custom_room', ({ code }) => {
+      if (code) byoneRooms.delete(code);
+    });
+
+    socket.on('join_byone_queue', async ({ username, tierId, betAmount, mode, customCode }) => {
+      try {
+        const bet = parseInt(betAmount, 10) || 50000;
+        const user = await User.findOne({ username });
+        if (!user || user.coins < bet) {
+          socket.emit('byone_error', { message: `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.` });
+          return;
+        }
+
+        const queueKey = customCode ? `code_${customCode}` : `tier_${tierId}_${mode || 'gaple'}`;
+        
+        // Check if there is an opponent already waiting in this queue
+        let opponent = null;
+        for (const [qKey, qItem] of byoneQueues) {
+          if (qKey === queueKey && qItem.username !== username && userSockets.get(qItem.username)) {
+            opponent = qItem;
+            byoneQueues.delete(qKey);
+            break;
+          }
+        }
+
+        if (opponent) {
+          // Found opponent! Create live 1v1 match!
+          const matchId = `byone_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+          const opponentUser = await User.findOne({ username: opponent.username });
+          
+          if (!opponentUser || opponentUser.coins < bet) {
+            byoneQueues.set(queueKey, { socketId: socket.id, username, tierId, betAmount: bet, mode, customCode });
+            socket.emit('byone_waiting', { queueKey });
+            return;
+          }
+
+          // Deduct initial bet from both players
+          user.coins = Math.max(0, user.coins - bet);
+          await user.save();
+          opponentUser.coins = Math.max(0, opponentUser.coins - bet);
+          await opponentUser.save();
+
+          const pot = bet * 2;
+          const matchData = {
+            matchId,
+            tierId,
+            betAmount: bet,
+            pot,
+            mode: mode || 'gaple',
+            player1: { username, socketId: socket.id, avatar: user.avatar, vipLevel: user.vipLevel, coins: user.coins },
+            player2: { username: opponent.username, socketId: opponent.socketId, avatar: opponentUser.avatar, vipLevel: opponentUser.vipLevel, coins: opponentUser.coins },
+            currentTurn: Math.random() > 0.5 ? username : opponent.username,
+            startedAt: Date.now()
+          };
+
+          byoneMatches.set(matchId, matchData);
+
+          // Notify both players
+          socket.emit('byone_matched', {
+            matchId,
+            isHost: true,
+            myRole: 'player1',
+            me: matchData.player1,
+            opponent: matchData.player2,
+            pot,
+            betAmount: bet,
+            currentTurn: matchData.currentTurn,
+            mode: matchData.mode
+          });
+
+          const oppSocket = io.sockets.sockets.get(opponent.socketId);
+          if (oppSocket) {
+            oppSocket.emit('byone_matched', {
+              matchId,
+              isHost: false,
+              myRole: 'player2',
+              me: matchData.player2,
+              opponent: matchData.player1,
+              pot,
+              betAmount: bet,
+              currentTurn: matchData.currentTurn,
+              mode: matchData.mode
+            });
+          }
+        } else {
+          // Put in waiting queue
+          byoneQueues.set(queueKey, { socketId: socket.id, username, tierId, betAmount: bet, mode, customCode });
+          socket.emit('byone_waiting', { queueKey, timeoutSec: 4 });
+        }
+      } catch (err) {
+        console.error('join_byone_queue error:', err);
+        socket.emit('byone_error', { message: 'Gagal mencari lawan by one.' });
+      }
+    });
+
+    socket.on('cancel_byone_queue', ({ username }) => {
+      for (const [key, item] of byoneQueues) {
+        if (item.username === username || item.socketId === socket.id) {
+          byoneQueues.delete(key);
+        }
+      }
+      socket.emit('byone_cancelled');
+    });
+
+    socket.on('byone_move', ({ matchId, moveData, nextTurn, newBoard }) => {
+      const match = byoneMatches.get(matchId);
+      if (!match) return;
+
+      match.currentTurn = nextTurn;
+      const targetSocketId = socket.id === match.player1.socketId ? match.player2.socketId : match.player1.socketId;
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('byone_opponent_moved', { moveData, nextTurn, newBoard });
+      }
+    });
+
+    socket.on('byone_propose_double', ({ matchId, fromUsername, proposedPot }) => {
+      const match = byoneMatches.get(matchId);
+      if (!match) return;
+
+      const targetSocketId = socket.id === match.player1.socketId ? match.player2.socketId : match.player1.socketId;
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('byone_double_bet_offered', { fromUsername, proposedPot });
+      }
+    });
+
+    socket.on('byone_respond_double', async ({ matchId, fromUsername, accepted, proposedPot }) => {
+      const match = byoneMatches.get(matchId);
+      if (!match) return;
+
+      const targetSocketId = socket.id === match.player1.socketId ? match.player2.socketId : match.player1.socketId;
+
+      if (accepted) {
+        const addBet = Math.floor((proposedPot - match.pot) / 2);
+        try {
+          const [u1, u2] = await Promise.all([
+            User.findOne({ username: match.player1.username }),
+            User.findOne({ username: match.player2.username })
+          ]);
+          if (u1 && u2 && u1.coins >= addBet && u2.coins >= addBet) {
+            u1.coins -= addBet; await u1.save();
+            u2.coins -= addBet; await u2.save();
+            match.pot = proposedPot;
+            io.to(match.player1.socketId).emit('byone_pot_updated', { pot: proposedPot, myCoins: u1.coins });
+            io.to(match.player2.socketId).emit('byone_pot_updated', { pot: proposedPot, myCoins: u2.coins });
+          }
+        } catch (e) {
+          console.error('Error updating double bet:', e);
+        }
+      } else {
+        const winnerUsername = socket.id === match.player1.socketId ? match.player2.username : match.player1.username;
+        const winnerSocketId = targetSocketId;
+        const pot = match.pot;
+
+        try {
+          const winnerUser = await User.findOne({ username: winnerUsername });
+          if (winnerUser) {
+            winnerUser.coins += pot;
+            await winnerUser.save();
+          }
+          io.to(socket.id).emit('byone_match_ended', { winner: winnerUsername, pot, byFold: true, isMeWinner: false });
+          if (winnerSocketId) {
+            io.to(winnerSocketId).emit('byone_match_ended', { winner: winnerUsername, pot, byFold: true, isMeWinner: true, newCoins: winnerUser ? winnerUser.coins : undefined });
+          }
+          byoneMatches.delete(matchId);
+        } catch (e) {
+          console.error('Error folding byone match:', e);
+        }
+      }
+    });
+
+    socket.on('byone_match_finish', async ({ matchId, winnerUsername, potAmount }) => {
+      const match = byoneMatches.get(matchId);
+      const pot = (match ? match.pot : potAmount) || potAmount || 0;
+
+      try {
+        const winnerUser = await User.findOne({ username: winnerUsername });
+        if (winnerUser && pot > 0) {
+          winnerUser.coins += pot;
+          await winnerUser.save();
+        }
+
+        if (match) {
+          io.to(match.player1.socketId).emit('byone_match_ended', {
+            winner: winnerUsername,
+            pot,
+            isMeWinner: match.player1.username === winnerUsername,
+            newCoins: match.player1.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+          });
+          io.to(match.player2.socketId).emit('byone_match_ended', {
+            winner: winnerUsername,
+            pot,
+            isMeWinner: match.player2.username === winnerUsername,
+            newCoins: match.player2.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+          });
+          byoneMatches.delete(matchId);
+        } else {
+          socket.emit('byone_match_ended', {
+            winner: winnerUsername,
+            pot,
+            isMeWinner: true,
+            newCoins: winnerUser ? winnerUser.coins : undefined
+          });
+        }
+      } catch (err) {
+        console.error('byone_match_finish error:', err);
+      }
+    });
+
+    socket.on('byone_taunt', ({ matchId, toUsername, emote, text }) => {
+      const targetSocketId = userSockets.get(toUsername);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('byone_taunt_received', { fromUsername: socket.username, emote, text });
+      }
+    });
+
+    socket.on('byone_invite_player', ({ fromUsername, toUsername, betAmount, tierName, mode }) => {
+      const targetSocketId = userSockets.get(toUsername);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('byone_challenge_received', {
+          fromUsername,
+          toUsername,
+          betAmount,
+          tierName: tierName || 'Meja Duel',
+          mode: mode || 'gaple'
+        });
+        socket.emit('byone_challenge_sent', { toUsername });
+      } else {
+        socket.emit('byone_error', { message: `Pemain ${toUsername} sedang tidak online.` });
+      }
+    });
+
+    socket.on('byone_respond_challenge', ({ fromUsername, toUsername, accepted, betAmount, mode, tierName }) => {
+      const senderSocketId = userSockets.get(fromUsername);
+      if (senderSocketId) {
+        io.to(senderSocketId).emit('byone_challenge_responded', {
+          fromUsername,
+          toUsername,
+          accepted,
+          betAmount,
+          mode,
+          tierName
+        });
       }
     });
 

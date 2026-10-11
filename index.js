@@ -7,6 +7,7 @@ const userController = require('./controllers/userController');
 const inboxController = require('./controllers/inboxController');
 const bonusController = require('./controllers/bonusController');
 const shopController = require('./controllers/shopController');
+const transferController = require('./controllers/transferController');
 const { initSocketIO } = require('./gameManager');
 
 const app = express();
@@ -46,6 +47,8 @@ app.post('/api/friends/accept', userController.acceptFriendRequest);
 app.post('/api/friends/decline', userController.declineFriendRequest);
 app.post('/api/friends/remove', userController.removeFriend);
 app.post('/api/transfer', userController.transferCoins);
+app.post('/api/users/transfer', userController.transferCoins);
+app.get('/api/transfers/:username', transferController.getTransferHistory);
 app.post('/api/users/update-coins', userController.updateCoins);
 
 // Inbox routes

@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const InboxMessage = require('../models/InboxMessage');
+const TransferHistory = require('../models/TransferHistory');
 const { checkAndCleanExpiredBonus, spendUserCoins } = require('../helpers/bonusHelper');
 
 function isSameDay(d1, d2) {
@@ -50,8 +51,41 @@ exports.getProfile = async (req, res) => {
 // Get top 3 leaderboard
 exports.getLeaderboard = async (req, res) => {
   try {
-    const users = await User.find().sort({ score: -1 }).limit(3);
-    res.json(users);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+    const users = await User.find({}, 'username avatar coins vipLevel')
+      .sort({ coins: -1, _id: 1 })
+      .limit(limit)
+      .lean();
+    const list = users.map((u, i) => ({
+      rank: i + 1,
+      username: u.username,
+      avatar: u.avatar,
+      coins: u.coins || 0,
+      vipLevel: u.vipLevel || 0
+    }));
+
+    // Peringkat pemain yang sedang melihat (jika di luar top N)
+    let me = null;
+    const { username } = req.query;
+    if (username) {
+      const mine = list.find(u => u.username === username);
+      if (mine) {
+        me = mine;
+      } else {
+        const user = await User.findOne({ username }, 'username avatar coins vipLevel').lean();
+        if (user) {
+          const ahead = await User.countDocuments({ coins: { $gt: user.coins || 0 } });
+          me = {
+            rank: ahead + 1,
+            username: user.username,
+            avatar: user.avatar,
+            coins: user.coins || 0,
+            vipLevel: user.vipLevel || 0
+          };
+        }
+      }
+    }
+    res.json({ leaderboard: list, me });
   } catch (error) {
     res.status(500).json({ error: 'Gagal memproses data peringkat' });
   }
@@ -247,6 +281,20 @@ exports.transferCoins = async (req, res) => {
     await sender.save();
     await receiver.save();
 
+    // Create TransferHistory record
+    const trxId = 'TRX-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(1000 + Math.random() * 9000);
+    await TransferHistory.create({
+      transactionId: trxId,
+      fromUsername: fromUsername,
+      toUsername: toUsername,
+      amount: transferAmount,
+      senderVip: vipLevel,
+      senderBalanceAfter: sender.coins,
+      receiverBalanceAfter: receiver.coins,
+      status: 'success',
+      note: req.body.note || 'Transfer Koin VIP'
+    }).catch(err => console.error('Gagal mencatat riwayat transfer:', err));
+
     // Inbox notification for receiver
     await InboxMessage.create({
       toUsername: toUsername,
@@ -260,6 +308,7 @@ exports.transferCoins = async (req, res) => {
 
     res.json({
       message: `Berhasil mengirim ${transferAmount.toLocaleString('id-ID')} koin ke ${toUsername}!`,
+      transactionId: trxId,
       senderCoins: sender.coins,
       dailySentCoinsToday: sender.dailySentCoins,
       vipLevel: vipLevel
