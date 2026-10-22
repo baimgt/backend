@@ -1229,6 +1229,39 @@ function initSocketIO(io) {
           byoneQueues.delete(key);
         }
       }
+
+      // Cleanup By One active matches on disconnect (surrender / award pot to remaining player)
+      for (const [matchId, match] of byoneMatches) {
+        if (match.player1.socketId === socket.id || match.player2.socketId === socket.id) {
+          const isP1 = match.player1.socketId === socket.id;
+          const remaining = isP1 ? match.player2 : match.player1;
+          const pot = match.pot || 0;
+
+          User.findOne({ username: remaining.username }).then(async (u) => {
+            if (u && pot > 0) {
+              u.coins += pot;
+              await u.save();
+            }
+            io.to(remaining.socketId).emit('byone_match_ended', {
+              winner: remaining.username,
+              pot,
+              byFold: true,
+              byDisconnect: true,
+              isMeWinner: true,
+              newCoins: u ? u.coins : undefined
+            });
+          }).catch(console.error);
+
+          byoneMatches.delete(matchId);
+        }
+      }
+
+      // Cleanup By One custom rooms if host disconnects
+      for (const [code, r] of byoneRooms) {
+        if (r.hostSocketId === socket.id) {
+          byoneRooms.delete(code);
+        }
+      }
     });
 
     // Get list of online friends
@@ -1246,19 +1279,25 @@ function initSocketIO(io) {
 
     socket.on('spin_slot', async ({ username, betAmount }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          socket.emit('spin_error', { message: 'Jumlah taruhan tidak valid' });
+          return;
+        }
+
         const user = await User.findOne({ username });
         if (!user) {
           socket.emit('spin_error', { message: 'User not found' });
           return;
         }
 
-        if (user.coins < betAmount) {
+        if (user.coins < bet) {
           socket.emit('spin_error', { message: 'Koin tidak cukup!' });
           return;
         }
 
         // 1. Deduct bet
-        user.coins -= betAmount;
+        user.coins -= bet;
 
         // 2. Track loss streak (HDI-style forced win mechanic)
         const streak = userLossStreak.get(username) || 0;
@@ -1386,6 +1425,8 @@ function initSocketIO(io) {
         // 6. Calculate final win
         const baseBet = Math.max(1, Math.floor(betAmount / 50));
         let winAmount = baseBet * totalWinMult;
+        const _lm = applyLineMultiplier(socket, 'duofu', false, winAmount);
+        winAmount = winAmount * _lm.mult;
 
         let winType = 'normal';
         if (totalWinMult >= 200) winType = 'mega_win';
@@ -1397,6 +1438,7 @@ function initSocketIO(io) {
 
         // 7. Send result
         socket.emit('spin_result', {
+          multiplier: _lm.info,
           grid,
           winAmount,
           totalWinMult,
@@ -1419,8 +1461,14 @@ function initSocketIO(io) {
 
     socket.on('spin_zeus', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, freeSpinMult, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          socket.emit('zeus_error', { message: 'Jumlah taruhan tidak valid' });
+          return;
+        }
+
         let user = await User.findOne({ username });
-        let betDeduction = actualBet || betAmount;
+        let betDeduction = actualBet || (anteBet ? Math.floor(bet * 1.25) : bet);
         
         // Guest / not-registered fallback: use client-provided balance
         let isGuestMode = false;
@@ -1447,7 +1495,7 @@ function initSocketIO(io) {
           { sym: 6, weight: 10 }, // Chalice
           { sym: 7, weight: 8  }, // Eagle
           { sym: 8, weight: 5  }, // Ship
-          { sym: 9, weight: anteBet ? 4 : 2  }, // Lightning (Scatter)
+          { sym: 9, weight: anteBet ? 5 : 2  }, // Lightning (Scatter - 2.5x chance on ante)
         ];
         const totalW = symbolWeights.reduce((a, v) => a + v.weight, 0);
         const pickSym = () => {
@@ -1498,7 +1546,8 @@ function initSocketIO(io) {
             for (let c = 0; c < COLS; c++) {
               const s = g[r][c];
               if (s === null || s === undefined) continue;
-              if (s === 9) { lightningPos.push([r, c]); continue; } // Lightning counted separately
+              if (s === 9) { lightningPos.push([r, c]); continue; }
+              if (s === 10) continue; // Multiplier orb
               if (!symCounts[s]) { symCounts[s] = 0; symPositions[s] = []; }
               symCounts[s]++;
               symPositions[s].push([r, c]);
@@ -1528,6 +1577,22 @@ function initSocketIO(io) {
           return wins;
         };
 
+        const _ms = slotMS(socket.id, 'zeus');
+        if (!isFreeSpins) _ms.freeMult = 1;
+        let randomMult = null;
+        let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
+        const zeusMultChance = isFreeSpins ? 0.85 : (anteBet ? 0.65 : 0.50);
+        if (Math.random() < zeusMultChance) {
+          const zOrbs = [2, 3, 5, 8, 10, 15, 20, 25, 50, 100];
+          randomMult = zOrbs[Math.floor(Math.random() * zOrbs.length)];
+          const r = Math.floor(Math.random() * ROWS);
+          const c = Math.floor(Math.random() * COLS);
+          if (grid[r][c] !== 9) {
+            grid[r][c] = 10;
+            multGrid[r][c] = randomMult;
+          }
+          if (isFreeSpins) _ms.freeMult += randomMult;
+        }
         let totalWinAmount = 0;
         let tumbleCount = 0;
         let allWinPositions = [];
@@ -1545,7 +1610,8 @@ function initSocketIO(io) {
           const winningPositions = new Set();
           wins.forEach(w => {
             if (w.isScatter) { scatterTriggered = true; scatterCount = w.count; return; }
-            const multiplier = isFreeSpins ? (freeSpinMult || 1) : 1;
+            const _lad = SLOT_LADDER[Math.min(t, SLOT_LADDER.length - 1)];
+            const multiplier = isFreeSpins ? (_ms.freeMult + _lad - 1) : _lad;
             const baseBet = Math.max(1, Math.floor(betAmount / 20));
             const winVal = Math.floor(baseBet * w.mult * multiplier);
             totalWinAmount += winVal;
@@ -1586,11 +1652,10 @@ function initSocketIO(io) {
 
         const freeSpinsAwarded = !isFreeSpins && scatterTriggered ? 10 + (scatterCount - 4) * 2 : 0;
 
-        // Random multiplier zeus drops during free spins
-        const multOptions = [2, 3, 5, 8, 10, 15, 25, 50, 100, 500];
-        const randomMult = (isFreeSpins && Math.random() < 0.4)
-          ? multOptions[Math.floor(Math.random() * multOptions.length)]
-          : null;
+        if (totalWinAmount > 0) {
+          if (isFreeSpins) totalWinAmount *= Math.max(1, _ms.freeMult);
+          else if (randomMult) totalWinAmount *= randomMult;
+        }
 
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
@@ -1599,9 +1664,11 @@ function initSocketIO(io) {
           : user.coins;
 
         socket.emit('zeus_result', {
+          freeMult: isFreeSpins ? _ms.freeMult : 0,
           grid: gridHistory[0],
           finalGrid: currentGrid,
           gridHistory,
+          multGrid,
           totalWinAmount: Math.floor(totalWinAmount),
           clusterWins,
           tumbleCount,
@@ -1626,24 +1693,29 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_fafafa', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          return socket.emit('fafafa_error', { message: 'Jumlah taruhan tidak valid' });
+        }
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) {
+          if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('fafafa_error', { message: 'Koin tidak cukup' });
           }
         } else {
-          if (user.coins < betAmount && !isFreeSpins) {
+          if (user.coins < bet && !isFreeSpins) {
             return socket.emit('fafafa_error', { message: 'Koin tidak cukup' });
           }
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betAmount;
-          else guestBalance -= betAmount;
+          if (user) user.coins -= bet;
+          else guestBalance -= bet;
         }
 
         // Generate 5x3 grid
@@ -1684,6 +1756,7 @@ function initSocketIO(io) {
           }
           grid.push(row);
         }
+
 
         const LINES = [
           [1,1,1,1,1], // 1 (Middle)
@@ -1786,12 +1859,18 @@ function initSocketIO(io) {
         else if (scatterCount === 4) freeSpinsAwarded = 20;
         else if (scatterCount === 3) freeSpinsAwarded = 10;
 
+        const _lm = applyLineMultiplier(socket, 'fafafa', isFreeSpins, totalWinAmount);
+        if (_lm.mult > 1) {
+          totalWinAmount = totalWinAmount * _lm.mult;
+          winningLines.forEach(w => { w.win = w.win * _lm.mult; });
+        }
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
         
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
 
         socket.emit('fafafa_result', {
+          multiplier: _lm.info,
           grid,
           totalWinAmount: Math.floor(totalWinAmount),
           winningLines,
@@ -1812,35 +1891,51 @@ function initSocketIO(io) {
     // =====================================================
     // 5 LIONS MEGAWAYS (五獅 MEGAWAYS) SLOT LOGIC
     // =====================================================
-    socket.on('spin_fivelions', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
+    socket.on('spin_fivelions', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          return socket.emit('fivelions_error', { message: 'Jumlah taruhan tidak valid' });
+        }
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
+        const isAnte = Boolean(anteBet);
+        const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) {
+          if (guestBalance < betDeduction && !isFreeSpins) {
             return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
           }
         } else {
-          if (user.coins < betAmount && !isFreeSpins) {
+          if (user.coins < betDeduction && !isFreeSpins) {
             return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
           }
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betAmount;
-          else guestBalance -= betAmount;
+          if (user) user.coins -= betDeduction;
+          else guestBalance -= betDeduction;
         }
 
         // Generate 6x3 grid
         const grid = [];
         let scatterCount = 0;
+        const scatterThreshold = isAnte ? 0.82 : 0.92;
         for (let r = 0; r < 3; r++) {
           const row = [];
           for (let c = 0; c < 6; c++) {
-            const sym = Math.floor(Math.random() * 12);
+            let sym = Math.floor(Math.random() * 12);
+            // Wild (5) only on middle reels (cols 1-4)
+            if ((c === 0 || c === 5) && sym === 5) {
+              sym = Math.random() < 0.5 ? 0 : 1;
+            }
+            // Scatter boost when ante is active
+            if (sym !== 5 && Math.random() > scatterThreshold) {
+              sym = 6;
+            }
             if (sym === 6) scatterCount++;
             row.push(sym);
           }
@@ -1851,12 +1946,37 @@ function initSocketIO(io) {
         const isWin = Math.random() > 0.45;
         let totalWinAmount = isWin ? Math.floor(betAmount * (1.5 + Math.random() * 5)) : 0;
 
+        // Authentic 5 Lions Megaways Wild Multiplier:
+        // Wild symbol (5) on middle reels (cols 1-4)
+        let hasWildInWin = false;
+        if (isWin) {
+          for (let r = 0; r < 3; r++) {
+            for (let c = 1; c <= 4; c++) {
+              if (grid[r][c] === 5) {
+                hasWildInWin = true;
+                break;
+              }
+            }
+          }
+        }
+
+        let wildMultiplier = 1;
+        if (hasWildInWin) {
+          const multOptions = isFreeSpins 
+            ? [10, 15, 30, 40] 
+            : [2, 3, 5, 8, 10, 15, 30, 40];
+          wildMultiplier = multOptions[Math.floor(Math.random() * multOptions.length)];
+          totalWinAmount = Math.floor(totalWinAmount * wildMultiplier);
+        }
+
         if (user) user.coins += totalWinAmount;
         if (!isGuestMode && user) await user.save();
 
         const newBalance = isGuestMode ? guestBalance + totalWinAmount : user.coins;
 
         socket.emit('fivelions_result', {
+          wildMultiplier,
+          hasWildInWin,
           grid,
           totalWinAmount,
           triggerFreeSpins: scatterCount >= 3,
@@ -1874,24 +1994,29 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_jinji', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          return socket.emit('jinji_error', { message: 'Jumlah taruhan tidak valid' });
+        }
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) {
+          if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('jinji_error', { message: 'Koin tidak cukup' });
           }
         } else {
-          if (user.coins < betAmount && !isFreeSpins) {
+          if (user.coins < bet && !isFreeSpins) {
             return socket.emit('jinji_error', { message: 'Koin tidak cukup' });
           }
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betAmount;
-          else guestBalance -= betAmount;
+          if (user) user.coins -= bet;
+          else guestBalance -= bet;
         }
 
         // Weighted symbol picker (ONLY symbols 0-7 from user-provided images)
@@ -1925,6 +2050,22 @@ function initSocketIO(io) {
             row.push(pickSym());
           }
           grid.push(row);
+        }
+
+        let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
+        let jjOrbSum = 0;
+        const jjMultChance = isFreeSpins ? 0.75 : 0.45;
+        if (Math.random() < jjMultChance) {
+          const zOrbs = [2, 3, 5, 8, 10, 15, 25, 50];
+          const count = 1 + (Math.random() < 0.3 ? 1 : 0);
+          for (let i = 0; i < count; i++) {
+            const r = Math.floor(Math.random() * ROWS);
+            const c = Math.floor(Math.random() * COLS);
+            const v = zOrbs[Math.floor(Math.random() * zOrbs.length)];
+            grid[r][c] = 12;
+            multGrid[r][c] = v;
+            jjOrbSum += v;
+          }
         }
 
         // 243 WAYS PAYTABLE (multiplier per way)
@@ -1975,6 +2116,9 @@ function initSocketIO(io) {
           }
         }
 
+        const _lm = applyLineMultiplier(socket, 'jinji', isFreeSpins, totalWinAmount);
+        totalWinAmount = totalWinAmount * _lm.mult;
+
         // Jackpot trigger chance (random 2% chance on spin)
         let triggerJackpot = false;
         let jackpotType = 'MINI';
@@ -1994,12 +2138,19 @@ function initSocketIO(io) {
         let triggerFreeSpins = Math.random() < 0.025;
         let freeSpinsAwarded = triggerFreeSpins ? 8 : 0;
 
+        if (jjOrbSum > 0) {
+          if (totalWinAmount === 0 && Math.random() < 0.5) totalWinAmount = bet * 2;
+          if (totalWinAmount > 0) totalWinAmount = Math.floor(totalWinAmount * jjOrbSum);
+        }
+
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
 
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
 
         socket.emit('jinji_result', {
+          multGrid,
+          multiplier: _lm.info,
           grid,
           winAmount: Math.floor(totalWinAmount),
           winningSymbols,
@@ -2009,7 +2160,7 @@ function initSocketIO(io) {
           triggerFreeSpins,
           freeSpinsAwarded,
           newBalance,
-          winType: totalWinAmount > betAmount * 100 ? 'mega_win' : totalWinAmount > betAmount * 30 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
+          winType: totalWinAmount > bet * 100 ? 'mega_win' : totalWinAmount > bet * 30 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
         });
 
       } catch (err) {
@@ -2023,24 +2174,29 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_mahjong', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) {
+          return socket.emit('mahjong_error', { message: 'Jumlah taruhan tidak valid' });
+        }
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) {
+          if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('mahjong_error', { message: 'Koin tidak cukup' });
           }
         } else {
-          if (user.coins < betAmount && !isFreeSpins) {
+          if (user.coins < bet && !isFreeSpins) {
             return socket.emit('mahjong_error', { message: 'Koin tidak cukup' });
           }
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betAmount;
-          else guestBalance -= betAmount;
+          if (user) user.coins -= bet;
+          else guestBalance -= bet;
         }
 
         // Weighted symbol picker for Mahjong 2
@@ -2101,8 +2257,10 @@ function initSocketIO(io) {
           7: { 5: 40,  4: 10,  3: 3 },  // 5 Dot
         };
 
-        const multSteps = isFreeSpins ? [2, 4, 6, 10] : [1, 2, 3, 5];
+        const _ms = slotMS(socket.id, 'mahjong');
+        if (!isFreeSpins) _ms.freeMult = 1;
         let totalWinAmount = 0;
+        let lastLadderIdx = 0;
         const gridHistory = [];
 
         // Save step 0
@@ -2117,7 +2275,9 @@ function initSocketIO(io) {
 
         // Tumble / Cascade Engine Loop
         for (let step = 0; step < 4; step++) {
-          const stepMult = multSteps[Math.min(step, multSteps.length - 1)];
+          const ladder = SLOT_LADDER[Math.min(step, SLOT_LADDER.length - 1)];
+          const stepMult = isFreeSpins ? (_ms.freeMult + ladder - 1) : ladder;
+          lastLadderIdx = Math.min(step, SLOT_LADDER.length - 1);
           let stepWin = 0;
           const winPositionsSet = new Set();
 
@@ -2158,11 +2318,14 @@ function initSocketIO(io) {
             const winPositions = Array.from(winPositionsSet);
 
             // Record tumble result
+            if (isFreeSpins) _ms.freeMult += 1;
             gridHistory.push({
               grid: currentGrid.map(r => [...r]),
               goldGrid: currentGoldGrid.map(r => [...r]),
               winPositions,
-              stepWin
+              stepWin,
+              ladderIdx: lastLadderIdx,
+              multiplierValue: stepMult
             });
 
             // Perform Cascade: Remove winning tiles, transform gold tiles to WILD (8)
@@ -2213,6 +2376,8 @@ function initSocketIO(io) {
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
 
         socket.emit('mahjong_result', {
+          freeMult: isFreeSpins ? _ms.freeMult : 0,
+          lastLadderIdx,
           initialGrid,
           initialGoldGrid,
           gridHistory,
@@ -2236,17 +2401,20 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_wildwest', async ({ username, betAmount, isFreeSpins, stickyWilds = [], clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('wildwest_error', { message: 'Jumlah taruhan tidak valid' });
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
+          if (guestBalance < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
         } else {
-          if (user.coins < betAmount && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
+          if (user.coins < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
         }
-        if (!isFreeSpins) { if (user) user.coins -= betAmount; else guestBalance -= betAmount; }
+        if (!isFreeSpins) { if (user) user.coins -= bet; else guestBalance -= bet; }
 
         const ROWS = 4, COLS = 5;
         const betUnit = Math.max(1, Math.floor(betAmount / 40));
@@ -2380,6 +2548,9 @@ function initSocketIO(io) {
           }
         }
 
+        const _lm = applyLineMultiplier(socket, 'wildwest', isFreeSpins, totalWinAmount);
+        totalWinAmount = totalWinAmount * _lm.mult;
+
         const triggerFreeSpins = scatterCount >= 3;
         const freeSpinsAwarded = triggerFreeSpins ? 8 : 0;
 
@@ -2388,6 +2559,7 @@ function initSocketIO(io) {
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
 
         socket.emit('wildwest_result', {
+          multiplier: _lm.info,
           initialGrid,
           initialWildMultGrid,
           winningCells: Array.from(winningCells),
@@ -2408,30 +2580,38 @@ function initSocketIO(io) {
     // =====================================================
     // CANDY RUSH - 6x5 COUNT-BASED + TUMBLE + BOMB MULTIPLIER
     // =====================================================
-    socket.on('spin_candy', async ({ username, betAmount, isFreeSpins, anteMode, clientBalance }) => {
+    socket.on('spin_candy', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('candy_error', { message: 'Jumlah taruhan tidak valid' });
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
+        const isAnte = Boolean(anteMode);
+        const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
+          if (guestBalance < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
         } else {
-          if (user.coins < betAmount && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
+          if (user.coins < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
         }
-        if (!isFreeSpins) { if (user) user.coins -= betAmount; else guestBalance -= betAmount; }
+        if (!isFreeSpins) { if (user) user.coins -= betDeduction; else guestBalance -= betDeduction; }
 
         const ROWS = 5, COLS = 6;
         const betUnit = Math.max(1, Math.floor(betAmount / 100));
         // sym 0=lollipop 1=cane 2=gummy 3=gold 4=pink 5=green 6=blue 7=purple 8=red 9=scatter 10=bomb
-        const WTS = [1, 2, 3, 5, 6, 7, 8, 9, 10, 3, 2];
+        const _ms = slotMS(socket.id, 'candy');
+        if (!isFreeSpins) _ms.freeMult = 1;
+        // WTS with scatter (sym 9) weight boosted from 3 to 7 when anteMode is true (double+ scatter rate)
+        const WTS = [1, 2, 3, 5, 6, 7, 8, 9, 10, isAnte ? 7 : 3, 2];
         const TWS = WTS.reduce((a, b) => a + b, 0);
-        const pick = (ab) => {
+        const pick = () => {
           let r = Math.random() * TWS;
           for (let i = 0; i < WTS.length; i++) {
-            let w = WTS[i]; if (ab && i === 9) w *= 2;
-            r -= w; if (r <= 0) return i;
+            r -= WTS[i];
+            if (r <= 0) return i;
           }
           return 4;
         };
@@ -2465,6 +2645,21 @@ function initSocketIO(io) {
           }
           cg.push(row); cmg.push(mr);
         }
+
+        // Drop multiplier bombs reliably (35% base, 75% free spins)
+        const candyMultChance = isFreeSpins ? 0.75 : 0.35;
+        if (Math.random() < candyMultChance) {
+          const numBombs = isFreeSpins ? (1 + Math.floor(Math.random() * 3)) : 1;
+          for (let bi = 0; bi < numBombs; bi++) {
+            const br = Math.floor(Math.random() * ROWS);
+            const bc = Math.floor(Math.random() * COLS);
+            if (cg[br][bc] !== 9) {
+              cg[br][bc] = 10;
+              cmg[br][bc] = rm();
+            }
+          }
+        }
+
         const ig = cg.map(r => [...r]), imr = cmg.map(r => [...r]);
         let totalWin = 0; const tumbleSteps = [];
 
@@ -2483,7 +2678,7 @@ function initSocketIO(io) {
             if (pm > 0) { sw += pm * betUnit; sp2[ss].forEach(p => wp.add(p)); }
           }
           if (sw <= 0) break;
-          const fm = Math.max(1, totalMult); sw *= fm; totalWin += sw;
+          const fm = tumbleStepMult(_ms, isFreeSpins, t, totalMult); sw *= fm; totalWin += sw;
           const ar = new Set([...wp, ...mp]);
           const ng = cg.map(r => [...r]), nm = cmg.map(r => [...r]);
           for (let c = 0; c < COLS; c++) {
@@ -2491,7 +2686,7 @@ function initSocketIO(io) {
             for (let r = ROWS - 1; r >= 0; r--) if (!ar.has(r + '-' + c)) { ng[wr][c] = cg[r][c]; nm[wr][c] = cmg[r][c]; wr--; }
             while (wr >= 0) { const ns = pick(anteMode); ng[wr][c] = ns; nm[wr][c] = ns === 10 ? rm() : 0; wr--; }
           }
-          tumbleSteps.push({ winPositions: Array.from(ar), stepWin: sw, multiplierValue: fm, newGrid: ng.map(r => [...r]), newMultGrid: nm.map(r => [...r]) });
+          tumbleSteps.push({ winPositions: Array.from(ar), stepWin: sw, multiplierValue: fm, ladderIdx: Math.min(t, 3), newGrid: ng.map(r => [...r]), newMultGrid: nm.map(r => [...r]) });
           cg = ng; cmg = nm;
         }
         const spm = SP[Math.min(scatterCount, 6)] || 0;
@@ -2501,6 +2696,7 @@ function initSocketIO(io) {
         if (!isGuestMode && user) await user.save();
         const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : user.coins;
         socket.emit('candy_result', {
+          freeMult: isFreeSpins ? _ms.freeMult : 0,
           initialGrid: ig, initialMultGrid: imr, tumbleSteps, scatterCount,
           totalWinAmount: Math.floor(totalWin), triggerFreeSpins: tf, freeSpinsAwarded: fa, newBalance: nb,
           winType: totalWin > betAmount * 100 ? 'mega_win' : totalWin > betAmount * 20 ? 'big_win' : totalWin > 0 ? 'win' : 'normal'
@@ -2812,7 +3008,11 @@ function initSocketIO(io) {
 
     socket.on('byone_match_finish', async ({ matchId, winnerUsername, potAmount }) => {
       const match = byoneMatches.get(matchId);
-      const pot = (match ? match.pot : potAmount) || potAmount || 0;
+      if (!match) return;
+      if (match.finished) return;
+      match.finished = true;
+
+      const pot = match.pot || potAmount || 0;
 
       try {
         const winnerUser = await User.findOne({ username: winnerUsername });
@@ -2821,28 +3021,19 @@ function initSocketIO(io) {
           await winnerUser.save();
         }
 
-        if (match) {
-          io.to(match.player1.socketId).emit('byone_match_ended', {
-            winner: winnerUsername,
-            pot,
-            isMeWinner: match.player1.username === winnerUsername,
-            newCoins: match.player1.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
-          });
-          io.to(match.player2.socketId).emit('byone_match_ended', {
-            winner: winnerUsername,
-            pot,
-            isMeWinner: match.player2.username === winnerUsername,
-            newCoins: match.player2.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
-          });
-          byoneMatches.delete(matchId);
-        } else {
-          socket.emit('byone_match_ended', {
-            winner: winnerUsername,
-            pot,
-            isMeWinner: true,
-            newCoins: winnerUser ? winnerUser.coins : undefined
-          });
-        }
+        io.to(match.player1.socketId).emit('byone_match_ended', {
+          winner: winnerUsername,
+          pot,
+          isMeWinner: match.player1.username === winnerUsername,
+          newCoins: match.player1.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+        });
+        io.to(match.player2.socketId).emit('byone_match_ended', {
+          winner: winnerUsername,
+          pot,
+          isMeWinner: match.player2.username === winnerUsername,
+          newCoins: match.player2.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+        });
+        byoneMatches.delete(matchId);
       } catch (err) {
         console.error('byone_match_finish error:', err);
       }
@@ -2888,68 +3079,86 @@ function initSocketIO(io) {
     // =====================================================
     // GATES OF GATOKACA - 6x5 COUNT-BASED + TUMBLE + MULTIPLIER ORBS
     // =====================================================
-    socket.on('spin_gatokaca', async ({ username, betAmount, isFreeSpins, anteMode, clientBalance }) => {
+    socket.on('spin_gatokaca', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
+        const bet = Number(betAmount);
+        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('gatokaca_error', { message: 'Jumlah taruhan tidak valid' });
+
         let user = await User.findOne({ username });
         let isGuestMode = false;
         let guestBalance = clientBalance || 6000000;
+        const isAnte = Boolean(anteMode);
+        const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
         if (!user) {
           isGuestMode = true;
-          if (guestBalance < betAmount && !isFreeSpins) {
+          if (guestBalance < betDeduction && !isFreeSpins) {
             return socket.emit('gatokaca_error', { message: 'Koin tidak cukup' });
           }
         } else {
-          if (user.coins < betAmount && !isFreeSpins) {
+          if (user.coins < betDeduction && !isFreeSpins) {
             return socket.emit('gatokaca_error', { message: 'Koin tidak cukup' });
           }
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betAmount;
-          else guestBalance -= betAmount;
+          if (user) user.coins -= betDeduction;
+          else guestBalance -= betDeduction;
         }
 
         const ROWS = 5, COLS = 6;
-        const betUnit = Math.max(1, Math.floor(betAmount / 100));
-        const WTS = [2, 3, 4, 6, 7, 8, 10, 12, 13, 4, 3];
+        const _ms = slotMS(socket.id, 'gatokaca');
+        if (!isFreeSpins) _ms.freeMult = 0;
+        // Regular paying symbols 0..8 (weights 2..13), and Scatter 9 (weight 4, boosted to 9 when anteMode is true)
+        const WTS = [2, 3, 4, 6, 7, 8, 10, 12, 13, isAnte ? 9 : 4];
         const TWS = WTS.reduce((a, b) => a + b, 0);
 
-        const pick = (ab) => {
+        const pick = () => {
           let r = Math.random() * TWS;
           for (let i = 0; i < WTS.length; i++) {
-            let w = WTS[i];
-            if (ab && i === 9) w *= 2;
-            r -= w;
+            r -= WTS[i];
             if (r <= 0) return i;
           }
           return 4;
         };
 
+        // TABEL PEMBAYARAN RESMI GATES OF GATOTKACA 1000 (PRAGMATIC PLAY):
+        // Sistem Scatter Pays (8+ simbol sejenis di mana saja di layar 6x5):
+        // Tiers: 8-9 simbol, 10-11 simbol, 12-30 simbol (pengali terhadap total bet)
         const PT = {
-          0: { 8: 10, 12: 50,  20: 250, 30: 500 },
-          1: { 8: 5,  12: 25,  20: 100, 30: 250 },
-          2: { 8: 3,  12: 15,  20: 60,  30: 150 },
-          3: { 8: 2,  12: 12,  20: 40,  30: 120 },
-          4: { 8: 2,  12: 10,  20: 30,  30: 100 },
-          5: { 8: 2,  12: 8,   20: 25,  30: 80  },
-          6: { 8: 1,  12: 5,   20: 20,  30: 50  },
-          7: { 8: 1,  12: 4,   20: 18,  30: 40  },
-          8: { 8: 1,  12: 2,   20: 14,  30: 20  },
+          0: { 8: 10,   10: 25,   12: 50 },  // Cincin Ruby
+          1: { 8: 2.5,  10: 10,   12: 25 },  // Singa Emas
+          2: { 8: 2,    10: 5,    12: 15 },  // Ramuan Hijau
+          3: { 8: 1.5,  10: 2,    12: 12 },  // Liontin Biru
+          4: { 8: 1,    10: 1.5,  12: 10 },  // Permata Merah
+          5: { 8: 0.8,  10: 1.2,  12: 8  },  // Permata Ungu
+          6: { 8: 0.5,  10: 1,    12: 5  },  // Permata Kuning
+          7: { 8: 0.4,  10: 0.9,  12: 4  },  // Permata Hijau
+          8: { 8: 0.25, 10: 0.75, 12: 2  },  // Permata Biru
         };
+        // Pembayaran Scatter (4: 3x, 5: 5x, 6+: 100x taruhan)
         const SP = { 4: 3, 5: 5, 6: 100 };
 
         const gcp = (s, cnt) => {
           if (!PT[s]) return 0;
-          let p = 0;
-          for (const t of Object.keys(PT[s]).map(Number).sort((a, b) => a - b)) {
-            if (cnt >= t) p = PT[s][t];
-          }
-          return p;
+          if (cnt >= 12) return PT[s][12];
+          if (cnt >= 10) return PT[s][10];
+          if (cnt >= 8) return PT[s][8];
+          return 0;
         };
 
-        const MV = [2, 3, 5, 8, 10, 15, 25, 50, 100, 500];
-        const rm = () => MV[Math.floor(Math.random() * MV.length)];
+        // Bobot nilai pengali otentik Gates of Gatot Kaca 1000 (2x hingga 1.000x):
+        // Hijau (2x-5x) ~60%, Biru (6x-12x) ~24%, Ungu (15x-25x) ~10%, Merah (50x-250x) ~5%, Ultra (500x-1000x) ~1%
+        const pickMultVal = () => {
+          const roll = Math.random();
+          if (roll < 0.40) return [2, 3, 4][Math.floor(Math.random() * 3)];
+          if (roll < 0.65) return [5, 6, 8][Math.floor(Math.random() * 3)];
+          if (roll < 0.85) return [10, 12, 15][Math.floor(Math.random() * 3)];
+          if (roll < 0.95) return [20, 25, 50][Math.floor(Math.random() * 3)];
+          if (roll < 0.985) return [100, 250][Math.floor(Math.random() * 2)];
+          if (roll < 0.997) return 500;
+          return 1000; // Legendary 1000x Multiplier!
+        };
 
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -2958,27 +3167,53 @@ function initSocketIO(io) {
             const s = pick(anteMode);
             if (s === 9) scatterCount++;
             row.push(s);
-            mr.push(s === 10 ? rm() : 0);
+            mr.push(0);
           }
           cg.push(row);
           cmg.push(mr);
         }
 
+        // KAPAN BOLA PENGALI TURUN (SESUAI PRAGMATIC PLAY):
+        // Base Game: ~12% (atau ~22% saat Ante Bet aktif).
+        // Free Spins: ~35% peluang petir Gatotkaca menyambar bola pengali.
+        const gatoMultChance = isFreeSpins ? 0.35 : (anteMode ? 0.22 : 0.12);
+        if (Math.random() < gatoMultChance) {
+          const numOrbs = isFreeSpins ? (Math.random() < 0.35 ? 2 : 1) : (Math.random() < 0.15 ? 2 : 1);
+          for (let oi = 0; oi < numOrbs; oi++) {
+            const or = Math.floor(Math.random() * ROWS);
+            const oc = Math.floor(Math.random() * COLS);
+            if (cg[or][oc] !== 9) {
+              cg[or][oc] = 10;
+              cmg[or][oc] = pickMultVal();
+            }
+          }
+        }
+
         const ig = cg.map(r => [...r]);
         const imr = cmg.map(r => [...r]);
-        let totalWin = 0;
+        let baseTumbleWin = 0;
         const tumbleSteps = [];
+
+        // All multiplier orbs collected across the spin
+        const collectedOrbs = new Set();
+        const recordOrbs = (grid, mgrid) => {
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+              if (grid[r][c] === 10 && mgrid[r][c] > 0) {
+                collectedOrbs.add(`${r}-${c}-${mgrid[r][c]}`);
+              }
+            }
+          }
+        };
+        recordOrbs(ig, imr);
 
         for (let t = 0; t < 10; t++) {
           const sc2 = {}, sp2 = {};
-          let totalMult = 0;
-          const mp = [];
 
           for (let r = 0; r < ROWS; r++) {
             for (let c = 0; c < COLS; c++) {
               const s = cg[r][c];
-              if (s === 10) { totalMult += cmg[r][c]; mp.push(r + '-' + c); }
-              else if (s !== 9) {
+              if (s !== 9 && s !== 10) {
                 sc2[s] = (sc2[s] || 0) + 1;
                 if (!sp2[s]) sp2[s] = [];
                 sp2[s].push(r + '-' + c);
@@ -2990,15 +3225,17 @@ function initSocketIO(io) {
           const wp = new Set();
           for (const [ss, cnt] of Object.entries(sc2)) {
             const pm = gcp(parseInt(ss), cnt);
-            if (pm > 0) { sw += pm * betUnit; sp2[ss].forEach(p => wp.add(p)); }
+            if (pm > 0) {
+              sw += Math.floor(pm * betAmount);
+              sp2[ss].forEach(p => wp.add(p));
+            }
           }
 
           if (sw <= 0) break;
-          const fm = Math.max(1, totalMult);
-          sw *= fm;
-          totalWin += sw;
+          baseTumbleWin += sw;
 
-          const ar = new Set([...wp, ...mp]);
+          // Only winning paying symbols explode; multiplier orbs stay on grid and drop down!
+          const ar = new Set([...wp]);
           const ng = cg.map(r => [...r]);
           const nm = cmg.map(r => [...r]);
           for (let c = 0; c < COLS; c++) {
@@ -3007,40 +3244,156 @@ function initSocketIO(io) {
               if (!ar.has(r + '-' + c)) { ng[wr][c] = cg[r][c]; nm[wr][c] = cmg[r][c]; wr--; }
             }
             while (wr >= 0) {
-              const ns = pick(anteMode);
-              ng[wr][c] = ns; nm[wr][c] = ns === 10 ? rm() : 0; wr--;
+              let ns = pick(anteMode);
+              let nmVal = 0;
+              // Peluang kecil bola pengali jatuh saat runtuhan baru (~3% base, ~6% free spins)
+              if (Math.random() < (isFreeSpins ? 0.06 : 0.03) && ns !== 9) {
+                ns = 10;
+                nmVal = pickMultVal();
+              }
+              ng[wr][c] = ns;
+              nm[wr][c] = nmVal;
+              wr--;
             }
           }
+          recordOrbs(ng, nm);
           tumbleSteps.push({
-            winPositions: Array.from(ar), stepWin: sw, multiplierValue: fm,
+            winPositions: Array.from(ar), stepWin: sw,
             newGrid: ng.map(r => [...r]), newMultGrid: nm.map(r => [...r])
           });
           cg = ng; cmg = nm;
         }
 
-        const spm = SP[Math.min(scatterCount, 6)] || 0;
-        if (spm > 0) totalWin += betAmount * spm;
-        const tf = scatterCount >= 4;
-        const fa = tf ? 15 : 0;
+        // Hitung total penjumlahan bola pengali di layar sesuai rumus:
+        // M_total = M1 + M2 + ... + Mn
+        let spinOrbsSum = 0;
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (cg[r][c] === 10 && cmg[r][c] > 0) {
+              spinOrbsSum += cmg[r][c];
+            }
+          }
+        }
+
+        // SISTEM PERHITUNGAN PENGALI (GATES OF GATOTKACA 1000 - PRAGMATIC PLAY):
+        // 1. Base Game: Jika terdapat kemenangan tumble dan terdapat bola pengali (spinOrbsSum > 0),
+        //    maka total kemenangan tumble dikalikan jumlah seluruh pengali di layar (M_total).
+        // 2. Free Spins: Jika terdapat kemenangan tumble dan ada bola pengali,
+        //    nilai pengali ditambahkan ke akumulasi TOTAL PENGALI (_ms.freeMult).
+        //    Total kemenangan putaran ini dikalikan TOTAL PENGALI tersebut.
+        let finalMultiplier = 1;
+        let totalWin = 0;
+
+        if (baseTumbleWin > 0) {
+          if (isFreeSpins) {
+            if (spinOrbsSum > 0) {
+              _ms.freeMult = (_ms.freeMult || 0) + spinOrbsSum;
+            }
+            finalMultiplier = Math.max(1, _ms.freeMult || 1);
+            totalWin = baseTumbleWin * finalMultiplier;
+          } else {
+            if (spinOrbsSum > 0) {
+              finalMultiplier = spinOrbsSum;
+              totalWin = baseTumbleWin * finalMultiplier;
+            } else {
+              finalMultiplier = 1;
+              totalWin = baseTumbleWin;
+            }
+          }
+        } else {
+          // Tidak ada kemenangan pecahan tumble: bola pengali tidak melipatgandakan dan tidak ditambahkan ke bank
+          finalMultiplier = isFreeSpins ? Math.max(1, _ms.freeMult || 1) : 1;
+          totalWin = 0;
+        }
+
+        // Pembayaran Tunai Scatter (4: 3x, 5: 5x, 6+: 100x taruhan)
+        if (scatterCount >= 4) {
+          const spm = SP[Math.min(scatterCount, 6)] || 3;
+          totalWin += Math.floor(betAmount * spm);
+        }
+
+        // ATURAN PEMICU & RETRIGGER PUTARAN GRATIS:
+        // Base Game: 4 atau lebih Scatter memicu 15 Putaran Gratis.
+        // Free Spins: 3 atau lebih Scatter memberikan +5 Putaran Gratis Tambahan!
+        const tf = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
+        const fa = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0);
+
+        // BATAS MAKSIMUM KEMENANGAN (MAX WIN GATOTKACA 1000 = 15.000x BET)
+        const maxWinCap = betAmount * 15000;
+        if (totalWin > maxWinCap) totalWin = maxWinCap;
 
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : user.coins;
 
         socket.emit('gatokaca_result', {
+          appliedMultiplier: finalMultiplier,
+          roundOrbsSum: spinOrbsSum,
+          freeMult: isFreeSpins ? Math.max(1, _ms.freeMult || 1) : 0,
+          baseTumbleWin,
+          totalWinAmount: Math.floor(totalWin),
           initialGrid: ig, initialMultGrid: imr, tumbleSteps, scatterCount,
-          totalWinAmount: Math.floor(totalWin), triggerFreeSpins: tf,
+          triggerFreeSpins: tf,
           freeSpinsAwarded: fa, newBalance: nb,
           winType: totalWin > betAmount * 100 ? 'mega_win' : totalWin > betAmount * 20 ? 'big_win' : totalWin > 0 ? 'win' : 'normal'
         });
 
       } catch (err) {
-        console.error('Gates of Gatokaca error:', err);
+        console.error('Gates of Gatotkaca error:', err);
         socket.emit('gatokaca_error', { message: 'Server error' });
       }
     });
 
   });
+}
+
+// =====================================================
+// SLOT MULTIPLIER SYSTEM (kali 2, kali 3, ... ala slot asli)
+//  - Base game  : tangga pengali x1 > x2 > x3 > x5 (tumble = per kemenangan beruntun,
+//                 game garis = per putaran menang beruntun). Reset saat tidak menang.
+//  - Free spins : pengali menumpuk & TIDAK reset sampai free spin habis
+//                 (scatter dulu terpakai baru pengali bertambah).
+// =====================================================
+const SLOT_LADDER = [1, 2, 3, 5];
+const slotMultStates = new Map();
+function slotMS(socketId, game) {
+  const k = socketId + ':' + game;
+  if (!slotMultStates.has(k)) {
+    if (slotMultStates.size > 3000) slotMultStates.delete(slotMultStates.keys().next().value);
+    slotMultStates.set(k, { streak: 0, freeMult: 1 });
+  }
+  return slotMultStates.get(k);
+}
+function applyLineMultiplier(socket, game, isFreeSpins, baseWin) {
+  const st = slotMS(socket.id, game);
+  let mult = 1, idx = 0;
+  if (!isFreeSpins) st.freeMult = 1;
+  if (baseWin > 0) {
+    if (isFreeSpins) {
+      st.freeMult += 1;
+      mult = st.freeMult;
+    } else {
+      st.streak += 1;
+      idx = Math.min(st.streak - 1, SLOT_LADDER.length - 1);
+      mult = SLOT_LADDER[idx];
+    }
+  } else {
+    if (!isFreeSpins) st.streak = 0;
+    mult = isFreeSpins ? Math.max(1, st.freeMult) : 1;
+  }
+  return {
+    mult,
+    info: { steps: SLOT_LADDER, idx, applied: mult, isFree: !!isFreeSpins, freeMult: isFreeSpins ? st.freeMult : 0 }
+  };
+}
+function tumbleStepMult(st, isFreeSpins, t, orbs) {
+  const ladder = SLOT_LADDER[Math.min(t, SLOT_LADDER.length - 1)];
+  if (isFreeSpins) {
+    const add = orbs > 0 ? orbs : 1;
+    st.freeMult += add;
+    return st.freeMult;
+  }
+  return ladder + orbs;
 }
 
 module.exports = { initSocketIO };
