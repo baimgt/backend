@@ -2,6 +2,7 @@
 // GAME MANAGER — Server-side game state & matchmaking
 // =====================================================
 const User = require('./models/User');
+const { spendUserCoins } = require('./helpers/bonusHelper');
 
 // Active waiting rooms: Map<roomKey, WaitingRoom>
 const waitingRooms = new Map();
@@ -48,6 +49,37 @@ function getRandomBotNames(count) {
   return shuffled.slice(0, count);
 }
 
+// Pragmatic Play authentic weighted multiplier generator:
+// 2x-5x: ~70%, 6x-12x: ~20%, 15x-25x: ~7.5%, 50x: ~1.7%, 100x+: ~0.8% (Ultra rare jackpot)
+function pickAuthenticMultiplier(maxTier = 500) {
+  const roll = Math.random();
+  if (roll < 0.35) return 2;
+  if (roll < 0.55) return 3;
+  if (roll < 0.65) return 4;
+  if (roll < 0.70) return 5;
+  if (roll < 0.77) return 6;
+  if (roll < 0.83) return 8;
+  if (roll < 0.87) return 10;
+  if (roll < 0.90) return 12;
+  if (roll < 0.94) return 15;
+  if (roll < 0.96) return 20;
+  if (roll < 0.975) return 25;
+  if (roll < 0.992) return 50;
+  // Multipliers 100x and above (very rare):
+  if (maxTier >= 1000) {
+    if (roll < 0.9975) return 100;
+    if (roll < 0.9990) return 250;
+    if (roll < 0.9997) return 500;
+    return 1000;
+  } else if (maxTier >= 500) {
+    if (roll < 0.9975) return 100;
+    if (roll < 0.9992) return 250;
+    return 500;
+  } else {
+    return 100;
+  }
+}
+
 // =====================================================
 // WAITING ROOM
 // =====================================================
@@ -76,9 +108,14 @@ class WaitingRoom {
 
     try {
       const user = await User.findOne({ username });
-      if (!user || user.coins < requiredBuyIn) {
+      const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
+      if (!user || usableCoins < requiredBuyIn) {
         this.players = this.players.filter(p => p !== tempPlayer);
-        socket.emit('error-msg', `⚠️ KOIN TIDAK CUKUP! Membutuhkan minimal ${requiredBuyIn.toLocaleString()} koin untuk taruhan.`);
+        if (user && user.bonusCoins > 0 && user.coins >= requiredBuyIn) {
+          socket.emit('error-msg', `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya bisa digunakan untuk game SLOT!\n\nKoin umum Domino Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin).`);
+        } else {
+          socket.emit('error-msg', `⚠️ KOIN TIDAK CUKUP! Membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin untuk taruhan.`);
+        }
         return false;
       }
     } catch (e) {
@@ -1098,17 +1135,20 @@ function initSocketIO(io) {
           User.findOne({ username: partnerUsername })
         ]);
 
-        if (!hostUser || hostUser.coins < requiredBuyIn) {
-          socket.emit('team-join-error', {
-            message: `⚠️ KOIN ANDA TIDAK CUKUP!\n\nAnda membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin untuk masuk kamar ${roomConfig.name}.`
-          });
+        const hostUsable = Math.max(0, (hostUser ? hostUser.coins : 0) - ((hostUser && hostUser.bonusCoins) || 0));
+        if (!hostUser || hostUsable < requiredBuyIn) {
+          const msg = hostUser && hostUser.bonusCoins > 0 && hostUser.coins >= requiredBuyIn
+            ? `⚠️ KOIN ANDA TIDAK CUKUP UNTUK DOMINO!\n\nKoin bonus harian hanya untuk bermain Slot. Koin umum Domino Anda: ${hostUsable.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin).`
+            : `⚠️ KOIN ANDA TIDAK CUKUP!\n\nAnda membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin untuk masuk kamar ${roomConfig.name}.`;
+          socket.emit('team-join-error', { message: msg });
           return;
         }
 
-        if (!partnerUser || partnerUser.coins < requiredBuyIn) {
-          const partnerCoins = partnerUser ? partnerUser.coins.toLocaleString('id-ID') : '0';
+        const partnerUsable = Math.max(0, (partnerUser ? partnerUser.coins : 0) - ((partnerUser && partnerUser.bonusCoins) || 0));
+        if (!partnerUser || partnerUsable < requiredBuyIn) {
+          const partnerCoins = partnerUsable.toLocaleString('id-ID');
           socket.emit('team-join-error', {
-            message: `⚠️ KOIN TEMAN SETIM TIDAK CUKUP!\n\nTeman setim Anda (${partnerUsername}) hanya memiliki ${partnerCoins} koin, tetapi kamar ${roomConfig.name} membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin.`
+            message: `⚠️ KOIN TEMAN SETIM TIDAK CUKUP!\n\nTeman setim Anda (${partnerUsername}) hanya memiliki ${partnerCoins} koin umum Domino, tetapi kamar ${roomConfig.name} membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin.`
           });
           return;
         }
@@ -1256,10 +1296,20 @@ function initSocketIO(io) {
         }
       }
 
-      // Cleanup By One custom rooms if host disconnects
+      // Cleanup By One custom rooms if player disconnects
       for (const [code, r] of byoneRooms) {
-        if (r.hostSocketId === socket.id) {
-          byoneRooms.delete(code);
+        if (r.players && Array.isArray(r.players)) {
+          const pIdx = r.players.findIndex(p => p.socketId === socket.id);
+          if (pIdx !== -1) {
+            const removed = r.players.splice(pIdx, 1)[0];
+            if (removed.isHost || r.players.length === 0) {
+              byoneRooms.delete(code);
+              io.to(`byone_room_${code}`).emit('byone_room_closed', { message: 'Pembuat kamar telah keluar.' });
+            } else {
+              r.pot = r.betAmount * r.players.length;
+              io.to(`byone_room_${code}`).emit('byone_room_updated', { code, room: r });
+            }
+          }
         }
       }
     });
@@ -1296,7 +1346,8 @@ function initSocketIO(io) {
           return;
         }
 
-        // 1. Deduct bet
+        // 1. Deduct bet (consume daily bonusCoins first if playing slot)
+        spendUserCoins(user, bet);
         user.coins -= bet;
 
         // 2. Track loss streak (HDI-style forced win mechanic)
@@ -1472,7 +1523,7 @@ function initSocketIO(io) {
         
         // Guest / not-registered fallback: use client-provided balance
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
         if (!user) {
           isGuestMode = true;
           if (!isFreeSpins && guestBalance < betDeduction) {
@@ -1481,7 +1532,10 @@ function initSocketIO(io) {
           if (!isFreeSpins) guestBalance -= betDeduction;
         } else {
           if (!isFreeSpins && user.coins < betDeduction) { socket.emit('zeus_error', { message: 'Koin tidak cukup!' }); return; }
-          if (!isFreeSpins) user.coins -= betDeduction;
+          if (!isFreeSpins) {
+            spendUserCoins(user, betDeduction);
+            user.coins -= betDeduction;
+          }
         }
 
         const ROWS = 5, COLS = 6;
@@ -1581,10 +1635,10 @@ function initSocketIO(io) {
         if (!isFreeSpins) _ms.freeMult = 1;
         let randomMult = null;
         let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
-        const zeusMultChance = isFreeSpins ? 0.85 : (anteBet ? 0.65 : 0.50);
+        // Peluang petir pengali Zeus turun (Base game ~12%, Ante bet ~20%, Free spins ~35%)
+        const zeusMultChance = isFreeSpins ? 0.35 : (anteBet ? 0.20 : 0.12);
         if (Math.random() < zeusMultChance) {
-          const zOrbs = [2, 3, 5, 8, 10, 15, 20, 25, 50, 100];
-          randomMult = zOrbs[Math.floor(Math.random() * zOrbs.length)];
+          randomMult = pickAuthenticMultiplier(500);
           const r = Math.floor(Math.random() * ROWS);
           const c = Math.floor(Math.random() * COLS);
           if (grid[r][c] !== 9) {
@@ -1700,7 +1754,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
 
         if (!user) {
           isGuestMode = true;
@@ -1714,7 +1768,10 @@ function initSocketIO(io) {
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= bet;
+          if (user) {
+            spendUserCoins(user, bet);
+            user.coins -= bet;
+          }
           else guestBalance -= bet;
         }
 
@@ -1900,7 +1957,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
         const isAnte = Boolean(anteBet);
         const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
@@ -1916,7 +1973,10 @@ function initSocketIO(io) {
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betDeduction;
+          if (user) {
+            spendUserCoins(user, betDeduction);
+            user.coins -= betDeduction;
+          }
           else guestBalance -= betDeduction;
         }
 
@@ -2001,7 +2061,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
 
         if (!user) {
           isGuestMode = true;
@@ -2015,7 +2075,10 @@ function initSocketIO(io) {
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= bet;
+          if (user) {
+            spendUserCoins(user, bet);
+            user.coins -= bet;
+          }
           else guestBalance -= bet;
         }
 
@@ -2054,14 +2117,13 @@ function initSocketIO(io) {
 
         let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
         let jjOrbSum = 0;
-        const jjMultChance = isFreeSpins ? 0.75 : 0.45;
+        const jjMultChance = isFreeSpins ? 0.35 : 0.14;
         if (Math.random() < jjMultChance) {
-          const zOrbs = [2, 3, 5, 8, 10, 15, 25, 50];
-          const count = 1 + (Math.random() < 0.3 ? 1 : 0);
+          const count = 1 + (Math.random() < 0.15 ? 1 : 0);
           for (let i = 0; i < count; i++) {
             const r = Math.floor(Math.random() * ROWS);
             const c = Math.floor(Math.random() * COLS);
-            const v = zOrbs[Math.floor(Math.random() * zOrbs.length)];
+            const v = pickAuthenticMultiplier(100);
             grid[r][c] = 12;
             multGrid[r][c] = v;
             jjOrbSum += v;
@@ -2181,7 +2243,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
 
         if (!user) {
           isGuestMode = true;
@@ -2195,22 +2257,25 @@ function initSocketIO(io) {
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= bet;
+          if (user) {
+            spendUserCoins(user, bet);
+            user.coins -= bet;
+          }
           else guestBalance -= bet;
         }
 
-        // Weighted symbol picker for Mahjong 2
+        // Weighted symbol picker for Mahjong 2 (Authentic PG Soft odds)
         const weights = [
-          { sym: 0, weight: 4 },  // Green Dragon
-          { sym: 1, weight: 5 },  // Red Dragon
-          { sym: 2, weight: 6 },  // Blue Dragon
+          { sym: 0, weight: 6 },  // Green Dragon
+          { sym: 1, weight: 7 },  // Red Dragon
+          { sym: 2, weight: 8 },  // Blue Dragon
           { sym: 3, weight: 12 }, // 8 Bam
           { sym: 4, weight: 14 }, // 8 Dot
           { sym: 5, weight: 15 }, // 8 Wan
           { sym: 6, weight: 18 }, // 5 Bam
           { sym: 7, weight: 20 }, // 5 Dot
-          { sym: 8, weight: 4 },  // Wild Ingot
-          { sym: 9, weight: 5 }   // Scatter Ingot
+          { sym: 8, weight: 5 },  // Wild Ingot
+          { sym: 9, weight: 1.2 } // Scatter Ingot (Authentic ~0.6% trigger rate across 20 tiles)
         ];
         
         const totalWeight = weights.reduce((acc, curr) => acc + curr.weight, 0);
@@ -2406,7 +2471,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
 
         if (!user) {
           isGuestMode = true;
@@ -2414,7 +2479,14 @@ function initSocketIO(io) {
         } else {
           if (user.coins < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
         }
-        if (!isFreeSpins) { if (user) user.coins -= bet; else guestBalance -= bet; }
+        if (!isFreeSpins) {
+          if (user) {
+            spendUserCoins(user, bet);
+            user.coins -= bet;
+          } else {
+            guestBalance -= bet;
+          }
+        }
 
         const ROWS = 4, COLS = 5;
         const betUnit = Math.max(1, Math.floor(betAmount / 40));
@@ -2587,7 +2659,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
         const isAnte = Boolean(anteMode);
         const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
@@ -2597,7 +2669,14 @@ function initSocketIO(io) {
         } else {
           if (user.coins < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
         }
-        if (!isFreeSpins) { if (user) user.coins -= betDeduction; else guestBalance -= betDeduction; }
+        if (!isFreeSpins) {
+          if (user) {
+            spendUserCoins(user, betDeduction);
+            user.coins -= betDeduction;
+          } else {
+            guestBalance -= betDeduction;
+          }
+        }
 
         const ROWS = 5, COLS = 6;
         const betUnit = Math.max(1, Math.floor(betAmount / 100));
@@ -2632,8 +2711,7 @@ function initSocketIO(io) {
           for (const t of Object.keys(PT[s]).map(Number).sort((a, b) => a - b)) if (cnt >= t) p = PT[s][t];
           return p;
         };
-        const MV = [2, 3, 5, 8, 10, 15, 25, 50, 100, 500];
-        const rm = () => MV[Math.floor(Math.random() * MV.length)];
+        const rm = () => pickAuthenticMultiplier(500);
 
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -2646,8 +2724,8 @@ function initSocketIO(io) {
           cg.push(row); cmg.push(mr);
         }
 
-        // Drop multiplier bombs reliably (35% base, 75% free spins)
-        const candyMultChance = isFreeSpins ? 0.75 : 0.35;
+        // Drop multiplier bombs (12% base, 20% ante, 35% free spins)
+        const candyMultChance = isFreeSpins ? 0.35 : (anteMode ? 0.20 : 0.12);
         if (Math.random() < candyMultChance) {
           const numBombs = isFreeSpins ? (1 + Math.floor(Math.random() * 3)) : 1;
           for (let bi = 0; bi < numBombs; bi++) {
@@ -2739,14 +2817,26 @@ function initSocketIO(io) {
     });
 
     // =====================================================
-    // BY ONE (1V1) ADU TARUHAN HANDLERS
+    // BY ONE ADU TARUHAN HANDLERS (MULTI-CAPACITY & REAL PLAYERS)
+    // Billiard: 2 players | Domino: 4 players | QiuQiu: 6 players
     // =====================================================
+    const getCapacityForMode = (mode) => {
+      if (mode === 'billiard') return 2;
+      if (mode === 'domino') return 4;
+      if (mode === 'qiuqiu') return 6;
+      return 2;
+    };
+
     socket.on('byone_create_custom_room', async ({ username, mode, betAmount }) => {
       try {
         const bet = parseInt(betAmount, 10) || 100000;
         const user = await User.findOne({ username });
-        if (!user || user.coins < bet) {
-          socket.emit('byone_room_error', { message: `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.` });
+        const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
+        if (!user || usableCoins < bet) {
+          const msg = user && user.bonusCoins > 0 && user.coins >= bet
+            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin).`
+            : `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.`;
+          socket.emit('byone_room_error', { message: msg });
           return;
         }
 
@@ -2755,20 +2845,28 @@ function initSocketIO(io) {
           code = Math.floor(100000 + Math.random() * 900000).toString();
         }
 
+        const gameMode = mode || 'domino';
+        const maxPlayers = getCapacityForMode(gameMode);
+
         const roomData = {
           code,
           hostUsername: username,
           hostSocketId: socket.id,
-          hostAvatar: user.avatar,
-          hostVip: user.vipLevel,
-          guestUsername: null,
-          guestSocketId: null,
-          guestAvatar: null,
-          guestVip: 0,
-          mode: mode || 'domino',
+          mode: gameMode,
+          maxPlayers,
           betAmount: bet,
-          pot: bet * 2,
-          createdAt: Date.now()
+          pot: bet,
+          createdAt: Date.now(),
+          players: [
+            {
+              username,
+              socketId: socket.id,
+              avatar: user.avatar || '👑',
+              vipLevel: user.vipLevel || 0,
+              coins: user.coins,
+              isHost: true,
+            }
+          ]
         };
 
         byoneRooms.set(code, roomData);
@@ -2787,65 +2885,157 @@ function initSocketIO(io) {
           socket.emit('byone_room_error', { message: `Kode Kamar #${code} tidak ditemukan atau sudah ditutup.` });
           return;
         }
-        if (roomData.hostUsername === username) {
-          socket.emit('byone_room_error', { message: 'Anda adalah pembuat kamar ini.' });
-          return;
-        }
-        if (roomData.guestUsername) {
-          socket.emit('byone_room_error', { message: `Kamar #${code} sudah penuh (2/2).` });
-          return;
-        }
 
-        const [hostUser, guestUser] = await Promise.all([
-          User.findOne({ username: roomData.hostUsername }),
-          User.findOne({ username })
-        ]);
-
-        if (!guestUser || guestUser.coins < roomData.betAmount) {
-          socket.emit('byone_room_error', { message: `Koin Anda tidak cukup! Butuh minimal ${roomData.betAmount.toLocaleString('id-ID')} koin.` });
-          return;
-        }
-        if (!hostUser || hostUser.coins < roomData.betAmount) {
-          socket.emit('byone_room_error', { message: 'Koin pembuat kamar tidak cukup untuk memulai duel.' });
+        const existingIdx = roomData.players.findIndex(p => p.username === username);
+        if (existingIdx !== -1) {
+          roomData.players[existingIdx].socketId = socket.id;
+          socket.join(`byone_room_${code}`);
+          socket.emit('byone_custom_room_created', { code, room: roomData });
           return;
         }
 
-        hostUser.coins -= roomData.betAmount; await hostUser.save();
-        guestUser.coins -= roomData.betAmount; await guestUser.save();
+        if (roomData.players.length >= roomData.maxPlayers) {
+          socket.emit('byone_room_error', { message: `Kamar #${code} sudah penuh (${roomData.players.length}/${roomData.maxPlayers}).` });
+          return;
+        }
 
-        roomData.guestUsername = username;
-        roomData.guestSocketId = socket.id;
-        roomData.guestAvatar = guestUser.avatar;
-        roomData.guestVip = guestUser.vipLevel;
+        const joiningUser = await User.findOne({ username });
+        const usableCoins = Math.max(0, (joiningUser ? joiningUser.coins : 0) - ((joiningUser && joiningUser.bonusCoins) || 0));
+        if (!joiningUser || usableCoins < roomData.betAmount) {
+          const msg = joiningUser && joiningUser.bonusCoins > 0 && joiningUser.coins >= roomData.betAmount
+            ? `⚠️ Koin klaim bonus harian (${(joiningUser.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${roomData.betAmount.toLocaleString('id-ID')} koin).`
+            : `Koin Anda tidak cukup! Butuh minimal ${roomData.betAmount.toLocaleString('id-ID')} koin.`;
+          socket.emit('byone_room_error', { message: msg });
+          return;
+        }
+
+        const newPlayer = {
+          username: joiningUser.username,
+          socketId: socket.id,
+          avatar: joiningUser.avatar || '🐸',
+          vipLevel: joiningUser.vipLevel || 0,
+          coins: joiningUser.coins,
+          isHost: false,
+        };
+
+        roomData.players.push(newPlayer);
+        roomData.pot = roomData.betAmount * roomData.players.length;
 
         socket.join(`byone_room_${code}`);
 
-        io.to(`byone_room_${code}`).emit('byone_room_duel_start', {
+        // Notify all sockets in this room of the newly joined player
+        io.to(`byone_room_${code}`).emit('byone_room_player_joined', {
           code,
-          mode: roomData.mode,
-          betAmount: roomData.betAmount,
-          pot: roomData.pot,
-          player1: { username: roomData.hostUsername, avatar: roomData.hostAvatar, vipLevel: roomData.hostVip, coins: hostUser.coins },
-          player2: { username: guestUser.username, avatar: guestUser.avatar, vipLevel: guestUser.vipLevel, coins: guestUser.coins }
+          room: roomData,
+          newPlayer
         });
-
-        byoneRooms.delete(code);
+        io.to(`byone_room_${code}`).emit('byone_room_updated', {
+          code,
+          room: roomData
+        });
       } catch (err) {
         console.error('byone_join_custom_room error:', err);
         socket.emit('byone_room_error', { message: 'Gagal bergabung ke kamar.' });
       }
     });
 
+    socket.on('byone_start_custom_room', async ({ code, username }) => {
+      try {
+        const roomData = byoneRooms.get(code);
+        if (!roomData) {
+          socket.emit('byone_room_error', { message: 'Kamar tidak ditemukan.' });
+          return;
+        }
+        if (roomData.hostUsername !== username) {
+          socket.emit('byone_room_error', { message: 'Hanya pembuat kamar yang dapat memulai permainan.' });
+          return;
+        }
+        if (roomData.players.length < 2) {
+          socket.emit('byone_room_error', { message: 'Minimal butuh 2 pemain untuk memulai permainan!' });
+          return;
+        }
+
+        // Deduct bet coins from all active players
+        for (const p of roomData.players) {
+          try {
+            const u = await User.findOne({ username: p.username });
+            if (u) {
+              u.coins = Math.max(0, u.coins - roomData.betAmount);
+              await u.save();
+              p.coins = u.coins;
+            }
+          } catch (e) {
+            console.error('Deducting coins error:', e);
+          }
+        }
+
+        const pot = roomData.betAmount * roomData.players.length;
+        roomData.pot = pot;
+
+        // Broadcast duel start to all players in the room with the actual players list
+        io.to(`byone_room_${code}`).emit('byone_room_duel_start', {
+          code,
+          mode: roomData.mode,
+          betAmount: roomData.betAmount,
+          pot,
+          players: roomData.players,
+          player1: roomData.players[0],
+          player2: roomData.players[1]
+        });
+
+        byoneRooms.delete(code);
+      } catch (err) {
+        console.error('byone_start_custom_room error:', err);
+        socket.emit('byone_room_error', { message: 'Gagal memulai duel.' });
+      }
+    });
+
+    socket.on('byone_leave_custom_room', ({ code, username }) => {
+      const roomData = byoneRooms.get(code);
+      if (!roomData) return;
+
+      const pIdx = roomData.players.findIndex(p => p.username === username);
+      if (pIdx !== -1) {
+        const removed = roomData.players.splice(pIdx, 1)[0];
+        socket.leave(`byone_room_${code}`);
+        if (removed.isHost || roomData.players.length === 0) {
+          byoneRooms.delete(code);
+          io.to(`byone_room_${code}`).emit('byone_room_closed', { message: 'Pembuat kamar telah menutup room.' });
+        } else {
+          roomData.pot = roomData.betAmount * roomData.players.length;
+          io.to(`byone_room_${code}`).emit('byone_room_updated', { code, room: roomData });
+        }
+      }
+    });
+
     socket.on('byone_cancel_custom_room', ({ code }) => {
-      if (code) byoneRooms.delete(code);
+      if (code) {
+        byoneRooms.delete(code);
+        io.to(`byone_room_${code}`).emit('byone_room_closed', { message: 'Kamar telah dibatalkan.' });
+      }
+    });
+
+    // Billiard Real-time Shot Synchronization
+    socket.on('billiard_join_room', ({ roomCode }) => {
+      if (roomCode) socket.join(`billiard_room_${roomCode}`);
+    });
+
+    socket.on('billiard_shot', ({ roomCode, angle, power, spin }) => {
+      if (roomCode) {
+        socket.to(`billiard_room_${roomCode}`).emit('billiard_opponent_shot', { angle, power, spin });
+      }
     });
 
     socket.on('join_byone_queue', async ({ username, tierId, betAmount, mode, customCode }) => {
       try {
         const bet = parseInt(betAmount, 10) || 50000;
         const user = await User.findOne({ username });
-        if (!user || user.coins < bet) {
-          socket.emit('byone_error', { message: `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.` });
+        const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
+        if (!user || usableCoins < bet) {
+          const msg = user && user.bonusCoins > 0 && user.coins >= bet
+            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin duel Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin).`
+            : `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.`;
+          socket.emit('byone_error', { message: msg });
           return;
         }
 
@@ -3086,7 +3276,7 @@ function initSocketIO(io) {
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
         const isAnte = Boolean(anteMode);
         const betDeduction = actualBet || (isAnte ? Math.floor(bet * 1.25) : bet);
 
@@ -3102,15 +3292,22 @@ function initSocketIO(io) {
         }
 
         if (!isFreeSpins) {
-          if (user) user.coins -= betDeduction;
+          if (user) {
+            spendUserCoins(user, betDeduction);
+            user.coins -= betDeduction;
+          }
           else guestBalance -= betDeduction;
         }
 
         const ROWS = 5, COLS = 6;
         const _ms = slotMS(socket.id, 'gatokaca');
         if (!isFreeSpins) _ms.freeMult = 0;
-        // Regular paying symbols 0..8 (weights 2..13), and Scatter 9 (weight 4, boosted to 9 when anteMode is true)
-        const WTS = [2, 3, 4, 6, 7, 8, 10, 12, 13, isAnte ? 9 : 4];
+        // AUTHENTIC PRAGMATIC PLAY REEL DISTRIBUTION:
+        // 9 regular paying symbols (0..8) spread to give authentic ~26% hit frequency.
+        // Symbols: 0 (Ring: 8), 1 (Lion: 9), 2 (Potion: 10), 3 (Pendant: 11),
+        //          4 (Red: 12), 5 (Purple: 13), 6 (Yellow: 14), 7 (Green: 15), 8 (Blue: 16)
+        // Scatter: 2.5 on regular (~0.6% / 1 in 165 spins), 3.2 on Ante Mode (~1.3% / 1 in 75 spins)
+        const WTS = [8, 9, 10, 11, 12, 13, 14, 15, 16, isAnte ? 3.2 : 2.5];
         const TWS = WTS.reduce((a, b) => a + b, 0);
 
         const pick = () => {
@@ -3148,17 +3345,8 @@ function initSocketIO(io) {
         };
 
         // Bobot nilai pengali otentik Gates of Gatot Kaca 1000 (2x hingga 1.000x):
-        // Hijau (2x-5x) ~60%, Biru (6x-12x) ~24%, Ungu (15x-25x) ~10%, Merah (50x-250x) ~5%, Ultra (500x-1000x) ~1%
-        const pickMultVal = () => {
-          const roll = Math.random();
-          if (roll < 0.40) return [2, 3, 4][Math.floor(Math.random() * 3)];
-          if (roll < 0.65) return [5, 6, 8][Math.floor(Math.random() * 3)];
-          if (roll < 0.85) return [10, 12, 15][Math.floor(Math.random() * 3)];
-          if (roll < 0.95) return [20, 25, 50][Math.floor(Math.random() * 3)];
-          if (roll < 0.985) return [100, 250][Math.floor(Math.random() * 2)];
-          if (roll < 0.997) return 500;
-          return 1000; // Legendary 1000x Multiplier!
-        };
+        // 2x-5x ~70%, 6x-12x ~20%, 15x-25x ~7.5%, 50x ~1.7%, 100x+ ~0.8% (Ultra rare)
+        const pickMultVal = () => pickAuthenticMultiplier(1000);
 
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -3174,9 +3362,9 @@ function initSocketIO(io) {
         }
 
         // KAPAN BOLA PENGALI TURUN (SESUAI PRAGMATIC PLAY):
-        // Base Game: ~12% (atau ~22% saat Ante Bet aktif).
-        // Free Spins: ~35% peluang petir Gatotkaca menyambar bola pengali.
-        const gatoMultChance = isFreeSpins ? 0.35 : (anteMode ? 0.22 : 0.12);
+        // Base Game: ~8% (atau ~14% saat Ante Bet aktif).
+        // Free Spins: ~25% peluang petir Gatotkaca menyambar bola pengali.
+        const gatoMultChance = isFreeSpins ? 0.25 : (anteMode ? 0.14 : 0.08);
         if (Math.random() < gatoMultChance) {
           const numOrbs = isFreeSpins ? (Math.random() < 0.35 ? 2 : 1) : (Math.random() < 0.15 ? 2 : 1);
           for (let oi = 0; oi < numOrbs; oi++) {
@@ -3244,10 +3432,11 @@ function initSocketIO(io) {
               if (!ar.has(r + '-' + c)) { ng[wr][c] = cg[r][c]; nm[wr][c] = cmg[r][c]; wr--; }
             }
             while (wr >= 0) {
-              let ns = pick(anteMode);
+              let ns = pick();
+              if (ns === 9) ns = Math.floor(Math.random() * 9); // Hindari penumpukan scatter saat tumble baru
               let nmVal = 0;
-              // Peluang kecil bola pengali jatuh saat runtuhan baru (~3% base, ~6% free spins)
-              if (Math.random() < (isFreeSpins ? 0.06 : 0.03) && ns !== 9) {
+              // Peluang kecil bola pengali jatuh saat runtuhan baru (~1% base, ~2.5% free spins)
+              if (Math.random() < (isFreeSpins ? 0.025 : 0.01)) {
                 ns = 10;
                 nmVal = pickMultVal();
               }

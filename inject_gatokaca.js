@@ -12,7 +12,7 @@ const gatokacaHandler = `
       try {
         let user = await User.findOne({ username });
         let isGuestMode = false;
-        let guestBalance = clientBalance || 6000000;
+        let guestBalance = clientBalance || 100000;
 
         if (!user) {
           isGuestMode = true;

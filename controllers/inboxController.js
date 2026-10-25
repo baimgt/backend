@@ -84,7 +84,7 @@ exports.seedWelcome = async (req, res) => {
         {
           toUsername: username, fromUsername: 'DOMINO', type: 'gift',
           title: '🎁 Bonus Login Pertama',
-          body: 'Anda mendapatkan 500.000 koin bonus sebagai hadiah login pertama. Selamat bermain!',
+          body: 'Anda mendapatkan 10.000 koin bonus sebagai hadiah pembuatan akun baru. Selamat bermain!',
           icon: '🎁',
         },
         {

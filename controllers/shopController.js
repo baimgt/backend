@@ -1,14 +1,15 @@
 const User = require('../models/User');
 const InboxMessage = require('../models/InboxMessage');
+const PaymentRecord = require('../models/PaymentRecord');
 
 // Store catalog definitions
 const COIN_PACKAGES = [
-  { id: 'coin_1m', name: '1.000.000 KOIN', coins: 1000000, priceRp: 'Rp 10.000', tag: 'Populer', icon: '🪙' },
-  { id: 'coin_5m', name: '5.000.000 KOIN', coins: 5000000, priceRp: 'Rp 45.000', tag: 'HEMAT 10%', icon: '💰' },
-  { id: 'coin_15m', name: '15.000.000 KOIN', coins: 15000000, priceRp: 'Rp 100.000', tag: 'BEST SELLER 🔥', icon: '💎' },
-  { id: 'coin_50m', name: '50.000.000 KOIN', coins: 50000000, priceRp: 'Rp 300.000', tag: 'SUPER HEMAT 40%', icon: '👑' },
-  { id: 'coin_150m', name: '150.000.000 KOIN', coins: 150000000, priceRp: 'Rp 750.000', tag: 'SULTAN PACK 🚀', icon: '🏆' },
-  { id: 'coin_500m', name: '500.000.000 KOIN', coins: 500000000, priceRp: 'Rp 2.000.000', tag: 'MEGA JACKPOT 🌟', icon: '⚜️' },
+  { id: 'coin_50k', name: '50.000 KOIN', coins: 50000, priceRp: 'Rp 70.000', tag: 'Populer', icon: '🪙' },
+  { id: 'coin_100k', name: '100.000 KOIN', coins: 100000, priceRp: 'Rp 130.000', tag: 'HEMAT 10%', icon: '💰' },
+  { id: 'coin_300k', name: '300.000 KOIN', coins: 300000, priceRp: 'Rp 370.000', tag: 'BEST SELLER 🔥', icon: '💎' },
+  { id: 'coin_500k', name: '500.000 KOIN', coins: 500000, priceRp: 'Rp 600.000', tag: 'SUPER HEMAT 40%', icon: '👑' },
+  { id: 'coin_700k', name: '700.000 KOIN', coins: 700000, priceRp: 'Rp 800.000', tag: 'SULTAN PACK 🚀', icon: '🏆' },
+  { id: 'coin_1jt', name: '1.000.000 KOIN', coins: 1000000, priceRp: 'Rp 1.200.000', tag: 'MEGA JACKPOT 🌟', icon: '⚜️' },
 ];
 
 const AVATAR_ITEMS = [
@@ -191,6 +192,108 @@ exports.convertRp = async (req, res) => {
       message: `Berhasil menukar ${rpUsed} RP menjadi +${coinsGained.toLocaleString('id-ID')} koin!`,
       coins: user.coins,
       rp: user.rp
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// POST /api/shop/verify-playstore-purchase
+exports.verifyPlayStorePurchase = async (req, res) => {
+  try {
+    const { username, packageId, itemType, paymentMethod, orderId, purchaseToken } = req.body;
+    if (!username) return res.status(400).json({ error: 'Username diperlukan' });
+    if (!packageId) return res.status(400).json({ error: 'Package ID diperlukan' });
+    if (!orderId) return res.status(400).json({ error: 'Order ID Google Play diperlukan' });
+
+    const user = await User.findOne({ username });
+    if (!user) return res.status(404).json({ error: 'Pemain tidak ditemukan' });
+
+    // Cek apakah orderId atau purchaseToken sudah pernah diproses (cegah duplicate redemption / replay attack)
+    const existingPayment = await PaymentRecord.findOne({
+      $or: [
+        { orderId },
+        ...(purchaseToken ? [{ purchaseToken }] : [])
+      ]
+    });
+    if (existingPayment) {
+      return res.status(400).json({ error: 'Transaksi ini sudah pernah diproses sebelumnya.' });
+    }
+
+    if (itemType === 'vip') {
+      const vip = VIP_PACKAGES.find(v => v.id === packageId);
+      if (!vip) return res.status(400).json({ error: 'Paket VIP tidak ditemukan di Google Play' });
+
+      // Catat transaksi
+      await PaymentRecord.create({
+        orderId,
+        purchaseToken: purchaseToken || null,
+        username,
+        packageId,
+        itemType: 'vip',
+        amountCoins: vip.coinsBonus,
+        paymentMethod: paymentMethod || 'Google Play Store',
+        status: 'COMPLETED'
+      });
+
+      user.vipLevel = Math.max(user.vipLevel || 0, vip.level);
+      user.coins += vip.coinsBonus;
+      await user.save();
+
+      await InboxMessage.create({
+        toUsername: username,
+        fromUsername: 'GOOGLE PLAY',
+        type: 'achievement',
+        title: `🛍️ Bukti Pembelian Google Play: ${vip.name}`,
+        body: `Pembayaran Google Play berhasil diverifikasi! Item: ${vip.name} (${vip.priceRp}). Metode: ${paymentMethod || 'Google Play Store'}. No. Pesanan: ${orderId}. Bonus +${vip.coinsBonus.toLocaleString('id-ID')} koin telah ditambahkan.`,
+        icon: '👑',
+        isRead: false
+      }).catch(() => {});
+
+      return res.json({
+        success: true,
+        message: `Pembayaran Google Play Berhasil! Anda kini ${vip.name}!`,
+        coins: user.coins,
+        vipLevel: user.vipLevel,
+        orderId
+      });
+    }
+
+    // Default: Coin package purchase
+    const pkg = COIN_PACKAGES.find(p => p.id === packageId);
+    if (!pkg) return res.status(400).json({ error: 'Paket koin Google Play tidak ditemukan' });
+
+    // Catat transaksi
+    await PaymentRecord.create({
+      orderId,
+      purchaseToken: purchaseToken || null,
+      username,
+      packageId,
+      itemType: 'coin',
+      amountCoins: pkg.coins,
+      paymentMethod: paymentMethod || 'Google Play Store',
+      status: 'COMPLETED'
+    });
+
+    user.coins += pkg.coins;
+    await user.save();
+
+    await InboxMessage.create({
+      toUsername: username,
+      fromUsername: 'GOOGLE PLAY',
+      type: 'gift',
+      title: `🛍️ Resi Pembelian Google Play: ${pkg.name}`,
+      body: `Pembayaran Google Play berhasil! Item: ${pkg.name} (${pkg.priceRp}). Metode: ${paymentMethod || 'Google Play Store'}. No. Pesanan: ${orderId}. Saldo +${pkg.coins.toLocaleString('id-ID')} koin telah masuk ke akun Anda.`,
+      icon: '🛍️',
+      isRead: false
+    }).catch(() => {});
+
+    return res.json({
+      success: true,
+      message: `Pembayaran Google Play Berhasil! (+${pkg.coins.toLocaleString('id-ID')} Koin)`,
+      coins: user.coins,
+      addedCoins: pkg.coins,
+      orderId
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

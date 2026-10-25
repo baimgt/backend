@@ -6,13 +6,23 @@ const userSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
+  userId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
   avatar: {
     type: String,
-    default: '/bg.png'
+    default: '🐸'
+  },
+  customFrame: {
+    type: String,
+    default: 'crown'
   },
   coins: {
     type: Number,
-    default: 0
+    default: 10000
   },
   rp: {
     type: Number,
@@ -61,6 +71,10 @@ const userSchema = new mongoose.Schema({
   lastSentDate: {
     type: Date,
     default: null
+  },
+  nameChangeCount: {
+    type: Number,
+    default: 0
   }
 }, { timestamps: true });
 

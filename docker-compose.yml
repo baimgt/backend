@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  # Backend Game (Express + Socket.IO)
+  backend:
+    build: .
+    container_name: domino_backend
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      MONGO_URI: "mongodb+srv://gamerstore:P1CwEUjy84OiTfAM@gamerstore.yy5ekdc.mongodb.net/domino_db?retryWrites=true&w=majority"
