@@ -389,31 +389,44 @@ exports.renderDashboard = async (req, res) => {
       setTimeout(() => { t.style.display = 'none'; }, 3500);
     }
 
+    function handleAvatarError(img) {
+      if (!img) return;
+      var span = document.createElement('span');
+      span.innerText = '👤';
+      span.className = 'user-avatar';
+      if (img.parentNode) {
+        img.parentNode.replaceChild(span, img);
+      }
+    }
+
     function renderAvatar(avatar) {
       if (!avatar) return '<div class="user-avatar">🐸</div>';
-      const str = String(avatar).trim();
+      var str = String(avatar).trim();
       if (str.startsWith('data:image/') || str.startsWith('http://') || str.startsWith('https://')) {
-        return '<img src="' + str + '" class="user-avatar" style="object-fit:cover;" onerror="this.outerHTML=\'<div class=\\\'user-avatar\\\'>👤</div>\'" />';
+        return '<img src="' + str + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
       }
       if (str.length > 50) {
-        const src = str.startsWith('data:') ? str : 'data:image/jpeg;base64,' + str;
-        return '<img src="' + src + '" class="user-avatar" style="object-fit:cover;" onerror="this.outerHTML=\'<div class=\\\'user-avatar\\\'>👤</div>\'" />';
+        var src = str.startsWith('data:') ? str : ('data:image/jpeg;base64,' + str);
+        return '<img src="' + src + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
       }
       return '<div class="user-avatar">' + str + '</div>';
     }
 
     async function loadUsers(query = '') {
+      const tbody = document.getElementById('userTableBody');
       try {
         const res = await fetch('/api/admin/users?q=' + encodeURIComponent(query));
         const data = await res.json();
-        if (!data.success) return;
+        if (!data.success) {
+          if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #ef4444; padding: 40px;">Gagal memuat data: ' + (data.error || 'Server error') + '</td></tr>';
+          return;
+        }
 
-        document.getElementById('statTotal').innerText = data.total.toLocaleString('id-ID');
-        document.getElementById('statAdmins').innerText = data.totalAdmins.toLocaleString('id-ID');
+        document.getElementById('statTotal').innerText = Number(data.total || 0).toLocaleString('id-ID');
+        document.getElementById('statAdmins').innerText = Number(data.totalAdmins || 0).toLocaleString('id-ID');
 
-        const tbody = document.getElementById('userTableBody');
-        if (data.users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 40px;">Tidak ada pemain ditemukan.</td></tr>';
+        if (!data.users || data.users.length === 0) {
+          if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 40px;">Tidak ada pemain ditemukan.</td></tr>';
           return;
         }
 
@@ -451,7 +464,10 @@ exports.renderDashboard = async (req, res) => {
           \`;
         }).join('');
       } catch (err) {
-        console.error(err);
+        console.error('loadUsers error:', err);
+        if (tbody) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #ef4444; padding: 40px;">Terjadi kesalahan saat memuat data: ' + err.message + '</td></tr>';
+        }
       }
     }
 
