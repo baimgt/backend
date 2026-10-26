@@ -470,7 +470,7 @@ exports.updateCoins = async (req, res) => {
     // Apply change
     if (updateAmount < 0) {
       const deduct = Math.abs(updateAmount);
-      const isSlot = gameType === 'slot';
+      const isSlot = gameType === 'slot' || req.body.isSlot === true || (typeof gameType === 'string' && gameType.toLowerCase().includes('slot'));
 
       if (!isSlot) {
         // Non-slot games (Domino, QiuQiu, Billiard, By One) CANNOT use daily bonus coins!
