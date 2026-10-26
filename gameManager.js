@@ -2839,7 +2839,8 @@ function initSocketIO(io) {
 
     socket.on('byone_create_custom_room', async ({ username, mode, betAmount }) => {
       try {
-        const bet = parseInt(betAmount, 10) || 100000;
+        const rawBet = parseInt(betAmount, 10);
+        const bet = Number.isFinite(rawBet) ? Math.min(200000, Math.max(5000, rawBet)) : 20000;
         const user = await User.findOne({ username });
         const regularCoins = user ? (user.coins || 0) : 0;
         if (!user || regularCoins < bet) {
