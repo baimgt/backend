@@ -270,8 +270,9 @@ exports.renderDashboard = async (req, res) => {
       gap: 12px;
     }
     .user-avatar {
-      width: 38px;
-      height: 38px;
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
       border-radius: 50%;
       background: #111;
       border: 2px solid var(--gold);
@@ -279,6 +280,8 @@ exports.renderDashboard = async (req, res) => {
       align-items: center;
       justify-content: center;
       font-size: 18px;
+      object-fit: cover;
+      overflow: hidden;
     }
     .badge {
       display: inline-flex;
@@ -386,6 +389,19 @@ exports.renderDashboard = async (req, res) => {
       setTimeout(() => { t.style.display = 'none'; }, 3500);
     }
 
+    function renderAvatar(avatar) {
+      if (!avatar) return '<div class="user-avatar">🐸</div>';
+      const str = String(avatar).trim();
+      if (str.startsWith('data:image/') || str.startsWith('http://') || str.startsWith('https://')) {
+        return '<img src="' + str + '" class="user-avatar" style="object-fit:cover;" onerror="this.outerHTML=\'<div class=\\\'user-avatar\\\'>👤</div>\'" />';
+      }
+      if (str.length > 50) {
+        const src = str.startsWith('data:') ? str : 'data:image/jpeg;base64,' + str;
+        return '<img src="' + src + '" class="user-avatar" style="object-fit:cover;" onerror="this.outerHTML=\'<div class=\\\'user-avatar\\\'>👤</div>\'" />';
+      }
+      return '<div class="user-avatar">' + str + '</div>';
+    }
+
     async function loadUsers(query = '') {
       try {
         const res = await fetch('/api/admin/users?q=' + encodeURIComponent(query));
@@ -407,7 +423,7 @@ exports.renderDashboard = async (req, res) => {
             <tr>
               <td>
                 <div class="user-cell">
-                  <div class="user-avatar">\${u.avatar || '🐸'}</div>
+                  \${renderAvatar(u.avatar)}
                   <div>
                     <div style="font-weight: 700; color: #fff;">\${u.username}</div>
                   </div>
