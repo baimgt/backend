@@ -1511,10 +1511,7 @@ function initSocketIO(io) {
     // =====================================================
     // ZEUS SLOT MACHINE (Gates of Olympus Style)
     // =====================================================
-    // Symbols: 0=9, 1=10, 2=J, 3=Q, 4=K, 5=A, 6=Diamond, 7=Chalice, 8=Ring, 9=Lightning(Wild+Scatter)
-    const zeusUserStreaks = new Map();
-
-    socket.on('spin_zeus', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, freeSpinMult, clientBalance }) => {
+    socket.on('spin_zeus', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, freeSpinMult, clientBalance, buyFeature }) => {
       try {
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
@@ -1523,7 +1520,9 @@ function initSocketIO(io) {
         }
 
         let user = await User.findOne({ username });
-        let betDeduction = actualBet || (anteBet ? Math.floor(bet * 1.25) : bet);
+        let betDeduction = buyFeature
+          ? (bet * 100)
+          : (actualBet || (anteBet ? Math.floor(bet * 1.25) : bet));
         
         // Guest / not-registered fallback: use client-provided balance
         let isGuestMode = false;
@@ -1547,136 +1546,157 @@ function initSocketIO(io) {
         }
 
         const ROWS = 5, COLS = 6;
+        const _ms = slotMS(socket.id, 'zeus');
+        if (!isFreeSpins) _ms.freeMult = 1;
+
+        // AUTHENTIC PRAGMATIC PLAY REEL DISTRIBUTION:
+        // 9 regular paying symbols (0..8) spread to give authentic ~26% hit frequency.
+        // Symbols: 0 (Crown: 8), 1 (Hourglass: 9), 2 (Ring: 10), 3 (Goblet: 11),
+        //          4 (Red: 12), 5 (Purple: 13), 6 (Yellow: 14), 7 (Green: 15), 8 (Blue: 16)
+        // Scatter (9): 2.5 on regular (~1 in 150 spins), 3.5 on Ante Bet (~1 in 80 spins)
         const symbolWeights = [
-          { sym: 0, weight: 22 }, // Z
-          { sym: 1, weight: 20 }, // Sigma
-          { sym: 2, weight: 18 }, // Omega
-          { sym: 3, weight: 16 }, // Psi
-          { sym: 4, weight: 14 }, // A
-          { sym: 5, weight: 12 }, // Crown
-          { sym: 6, weight: 10 }, // Chalice
-          { sym: 7, weight: 8  }, // Eagle
-          { sym: 8, weight: 5  }, // Ship
-          { sym: 9, weight: anteBet ? 5 : 2  }, // Lightning (Scatter - 2.5x chance on ante)
+          { sym: 0, weight: 8 },  // Mahkota Emas (Crown - Simbol Termahal)
+          { sym: 1, weight: 9 },  // Jam Pasir (Hourglass)
+          { sym: 2, weight: 10 }, // Cincin Ruby (Ring)
+          { sym: 3, weight: 11 }, // Cawan Emas (Goblet)
+          { sym: 4, weight: 12 }, // Permata Merah (Red Gem)
+          { sym: 5, weight: 13 }, // Permata Ungu (Purple Gem)
+          { sym: 6, weight: 14 }, // Permata Kuning (Yellow Gem)
+          { sym: 7, weight: 15 }, // Permata Hijau (Green Gem)
+          { sym: 8, weight: 16 }, // Permata Biru (Blue Gem)
+          { sym: 9, weight: anteBet ? 3.5 : 2.5 }, // Zeus Scatter
         ];
         const totalW = symbolWeights.reduce((a, v) => a + v.weight, 0);
         const pickSym = () => {
           let r = Math.random() * totalW;
           for (const w of symbolWeights) { if (r < w.weight) return w.sym; r -= w.weight; }
+          return 8;
+        };
+
+        // TABEL PEMBAYARAN RESMI GATES OF OLYMPUS (PRAGMATIC PLAY):
+        // Sistem Scatter Pays (8+ simbol sejenis di mana saja di layar 6x5):
+        // Tiers: 8-9 simbol, 10-11 simbol, 12-30 simbol (pengali terhadap total bet)
+        const PT = {
+          0: { 8: 10,   10: 25,   12: 50 },  // Mahkota Emas
+          1: { 8: 2.5,  10: 10,   12: 25 },  // Jam Pasir
+          2: { 8: 2,    10: 5,    12: 15 },  // Cincin Ruby
+          3: { 8: 1.5,  10: 2,    12: 12 },  // Cawan Emas
+          4: { 8: 1,    10: 1.5,  12: 10 },  // Permata Merah
+          5: { 8: 0.8,  10: 1.2,  12: 8  },  // Permata Ungu
+          6: { 8: 0.5,  10: 1,    12: 5  },  // Permata Kuning
+          7: { 8: 0.4,  10: 0.9,  12: 4  },  // Permata Hijau
+          8: { 8: 0.25, 10: 0.75, 12: 2  },  // Permata Biru
+        };
+        // Pembayaran Tunai Scatter (4: 3x, 5: 5x, 6+: 100x taruhan)
+        const SP = { 4: 3, 5: 5, 6: 100 };
+
+        const getClusterMultiplier = (sym, count) => {
+          if (!PT[sym]) return 0;
+          if (count >= 12) return PT[sym][12];
+          if (count >= 10) return PT[sym][10];
+          if (count >= 8) return PT[sym][8];
           return 0;
         };
 
-        // Force win mechanic (Pity)
-        const streak = zeusUserStreaks.get(username) || 0;
-        const forceWin = streak >= (20 + Math.floor(Math.random() * 15));
-
-        // Generate initial grid
+        // Generate initial grid (100% Pure RNG - Murni Kehokian Asli)
         let grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, pickSym));
+        let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
 
-        if (forceWin && !isFreeSpins) {
-          // Inject 8+ of same common symbol
-          const forcedSym = Math.floor(Math.random() * 6);
+        // If Buy Feature: Pemain membeli fitur spin gratis (100x bet) -> jaminan 4 atau 5 Scatter
+        if (buyFeature) {
+          const numScatters = Math.random() < 0.85 ? 4 : (Math.random() < 0.96 ? 5 : 6);
           const used = new Set();
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+              if (grid[r][c] === 9) grid[r][c] = Math.floor(Math.random() * 9);
+            }
+          }
           let placed = 0;
-          while (placed < 8) {
+          while (placed < numScatters) {
             const r = Math.floor(Math.random() * ROWS);
             const c = Math.floor(Math.random() * COLS);
-            const key = r * COLS + c;
-            if (!used.has(key)) { used.add(key); grid[r][c] = forcedSym; placed++; }
+            const key = `${r},${c}`;
+            if (!used.has(key)) {
+              used.add(key);
+              grid[r][c] = 9;
+              placed++;
+            }
           }
-          zeusUserStreaks.set(username, 0);
         }
 
-        // Cluster win checker (8+ of same symbol anywhere = win)
-        const payTable = {
-          0: [0, 0, 0, 0, 0, 0, 0, 0, 0.5, 0.8, 1.2, 1.8, 3  ], // 9
-          1: [0, 0, 0, 0, 0, 0, 0, 0, 0.5, 0.8, 1.2, 1.8, 3  ], // 10
-          2: [0, 0, 0, 0, 0, 0, 0, 0, 0.8, 1.2, 1.8, 2.5, 4  ], // J
-          3: [0, 0, 0, 0, 0, 0, 0, 0, 0.8, 1.2, 1.8, 2.5, 4  ], // Q
-          4: [0, 0, 0, 0, 0, 0, 0, 0, 1.2, 2,   3,   5,   8  ], // K
-          5: [0, 0, 0, 0, 0, 0, 0, 0, 1.2, 2,   3,   5,   8  ], // A
-          6: [0, 0, 0, 0, 0, 0, 0, 0, 2.5, 4,   7,   12,  25 ], // Diamond
-          7: [0, 0, 0, 0, 0, 0, 0, 0, 4,   7,   12,  20,  40 ], // Chalice
-          8: [0, 0, 0, 0, 0, 0, 0, 0, 8,   15,  25,  50,  100], // Ring
-        };
+        // Multiplier Orbs (Zeus Petir Sambaran 2x - 500x)
+        // Base Game: ~12% (Ante bet ~20%)
+        // Free Spins: ~35%
+        const zeusMultChance = isFreeSpins ? 0.35 : (anteBet ? 0.20 : 0.12);
+        if (Math.random() < zeusMultChance) {
+          const numOrbs = isFreeSpins ? (Math.random() < 0.35 ? 2 : 1) : (Math.random() < 0.15 ? 2 : 1);
+          for (let oi = 0; oi < numOrbs; oi++) {
+            const r = Math.floor(Math.random() * ROWS);
+            const c = Math.floor(Math.random() * COLS);
+            if (grid[r][c] !== 9) {
+              grid[r][c] = 10;
+              multGrid[r][c] = pickAuthenticMultiplier(500);
+            }
+          }
+        }
 
+        // Check cluster wins function
         const checkClusterWins = (g) => {
           const symCounts = {};
           const symPositions = {};
-          const lightningPos = [];
+          const scatterPos = [];
           for (let r = 0; r < ROWS; r++) {
             for (let c = 0; c < COLS; c++) {
               const s = g[r][c];
               if (s === null || s === undefined) continue;
-              if (s === 9) { lightningPos.push([r, c]); continue; }
-              if (s === 10) continue; // Multiplier orb
+              if (s === 9) { scatterPos.push([r, c]); continue; }
+              if (s === 10) continue; // Multiplier orb stays on board
               if (!symCounts[s]) { symCounts[s] = 0; symPositions[s] = []; }
               symCounts[s]++;
               symPositions[s].push([r, c]);
             }
           }
-          const lightningCount = lightningPos.length;
           const wins = [];
           for (let sym = 0; sym <= 8; sym++) {
-            const totalCount = symCounts[sym] || 0;
-            if (totalCount >= 8) {
-              const cap = Math.min(totalCount, 12);
-              const mult = payTable[sym][cap] || 0;
+            const count = symCounts[sym] || 0;
+            if (count >= 8) {
+              const mult = getClusterMultiplier(sym, count);
               if (mult > 0) {
                 wins.push({
                   sym,
-                  count: cap,
+                  count,
                   mult,
                   positions: [...(symPositions[sym] || [])]
                 });
               }
             }
           }
-          // Check scatter (lightning) regardless of wins
-          if (lightningCount >= 4) {
-            wins.push({ sym: 9, count: lightningCount, mult: 0, positions: lightningPos, isScatter: true });
-          }
-          return wins;
+          return { wins, scatterCount: scatterPos.length, scatterPos };
         };
 
-        const _ms = slotMS(socket.id, 'zeus');
-        if (!isFreeSpins) _ms.freeMult = 1;
-        let randomMult = null;
-        let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
-        // Peluang petir pengali Zeus turun (Base game ~12%, Ante bet ~20%, Free spins ~35%)
-        const zeusMultChance = isFreeSpins ? 0.35 : (anteBet ? 0.20 : 0.12);
-        if (Math.random() < zeusMultChance) {
-          randomMult = pickAuthenticMultiplier(500);
-          const r = Math.floor(Math.random() * ROWS);
-          const c = Math.floor(Math.random() * COLS);
-          if (grid[r][c] !== 9) {
-            grid[r][c] = 10;
-            multGrid[r][c] = randomMult;
-          }
-          if (isFreeSpins) _ms.freeMult += randomMult;
-        }
-        let totalWinAmount = 0;
+        let baseTumbleWin = 0;
         let tumbleCount = 0;
         let allWinPositions = [];
         let clusterWins = [];
         let gridHistory = [JSON.parse(JSON.stringify(grid))];
-        let scatterTriggered = false;
-        let scatterCount = 0;
         let currentGrid = JSON.parse(JSON.stringify(grid));
+        let scatterCount = 0;
+
+        // Check initial scatter count
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (currentGrid[r][c] === 9) scatterCount++;
+          }
+        }
 
         for (let t = 0; t < 10; t++) {
-          const wins = checkClusterWins(currentGrid);
+          const { wins } = checkClusterWins(currentGrid);
           if (wins.length === 0) break;
 
-          // Process wins
           const winningPositions = new Set();
           wins.forEach(w => {
-            if (w.isScatter) { scatterTriggered = true; scatterCount = w.count; return; }
-            const _lad = SLOT_LADDER[Math.min(t, SLOT_LADDER.length - 1)];
-            const multiplier = isFreeSpins ? (_ms.freeMult + _lad - 1) : _lad;
-            const baseBet = Math.max(1, Math.floor(betAmount / 20));
-            const winVal = Math.floor(baseBet * w.mult * multiplier);
-            totalWinAmount += winVal;
+            const winVal = Math.floor(bet * w.mult);
+            baseTumbleWin += winVal;
             clusterWins.push({ sym: w.sym, count: w.count, winAmount: winVal, tumble: t });
             w.positions.forEach(([r, c]) => {
               winningPositions.add(`${r},${c}`);
@@ -1687,62 +1707,132 @@ function initSocketIO(io) {
           if (winningPositions.size === 0) break;
           tumbleCount++;
 
-          // Remove winning symbols (set to null = "empty")
+          // Winning symbols vanish (set to null)
           winningPositions.forEach(key => {
             const [r, c] = key.split(',').map(Number);
             currentGrid[r][c] = null;
           });
 
-          // Push the exploded state so frontend can show empty spaces/explosions
+          // Empty / exploded grid for frontend
           gridHistory.push(JSON.parse(JSON.stringify(currentGrid)));
 
-          // Gravity: drop symbols down
+          // Gravity drop
           for (let c = 0; c < COLS; c++) {
-            const existing = [];
+            const existingSyms = [];
+            const existingMults = [];
             for (let r = ROWS - 1; r >= 0; r--) {
-              if (currentGrid[r][c] !== null && currentGrid[r][c] !== undefined) existing.push(currentGrid[r][c]);
+              if (currentGrid[r][c] !== null && currentGrid[r][c] !== undefined) {
+                existingSyms.push(currentGrid[r][c]);
+                existingMults.push(multGrid[r][c] || 0);
+              }
             }
-            while (existing.length < ROWS) existing.push(pickSym());
-            for (let r = 0; r < ROWS; r++) currentGrid[r][c] = existing[ROWS - 1 - r];
+            while (existingSyms.length < ROWS) {
+              let newS = pickSym();
+              if (newS === 9) newS = Math.floor(Math.random() * 9); // avoid duplicate scatter cluster in cascade
+              let newM = 0;
+              if (Math.random() < (isFreeSpins ? 0.035 : 0.015)) {
+                newS = 10;
+                newM = pickAuthenticMultiplier(500);
+              }
+              existingSyms.push(newS);
+              existingMults.push(newM);
+            }
+            for (let r = 0; r < ROWS; r++) {
+              currentGrid[r][c] = existingSyms[ROWS - 1 - r];
+              multGrid[r][c] = existingMults[ROWS - 1 - r];
+            }
           }
+
+          // Post-gravity grid for frontend
           gridHistory.push(JSON.parse(JSON.stringify(currentGrid)));
         }
 
-        // Update streak
-        if (totalWinAmount === 0 && !forceWin) zeusUserStreaks.set(username, streak + 1);
-        else if (totalWinAmount > 0) zeusUserStreaks.set(username, 0);
-
-        const freeSpinsAwarded = !isFreeSpins && scatterTriggered ? 10 + (scatterCount - 4) * 2 : 0;
-
-        if (totalWinAmount > 0) {
-          if (isFreeSpins) totalWinAmount *= Math.max(1, _ms.freeMult);
-          else if (randomMult) totalWinAmount *= randomMult;
+        // Sum all multiplier orbs visible on the board at the end of tumbles
+        let spinOrbsSum = 0;
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (currentGrid[r][c] === 10 && multGrid[r][c] > 0) {
+              spinOrbsSum += multGrid[r][c];
+            }
+          }
         }
 
-        user && (user.coins += Math.floor(totalWinAmount));
+        // Calculate Multiplier & Total Win (Pragmatic Play Rules)
+        let finalMultiplier = 1;
+        let totalWin = 0;
+
+        if (baseTumbleWin > 0) {
+          if (isFreeSpins) {
+            if (spinOrbsSum > 0) {
+              _ms.freeMult = (_ms.freeMult || 1) + spinOrbsSum;
+            }
+            finalMultiplier = Math.max(1, _ms.freeMult || 1);
+            totalWin = baseTumbleWin * finalMultiplier;
+          } else {
+            if (spinOrbsSum > 0) {
+              finalMultiplier = spinOrbsSum;
+              totalWin = baseTumbleWin * finalMultiplier;
+            } else {
+              finalMultiplier = 1;
+              totalWin = baseTumbleWin;
+            }
+          }
+        } else {
+          finalMultiplier = isFreeSpins ? Math.max(1, _ms.freeMult || 1) : 1;
+          totalWin = 0;
+        }
+
+        // Scatter cash payout:
+        // 4 Scatters: 3x bet
+        // 5 Scatters: 5x bet
+        // 6+ Scatters: 100x bet
+        if (scatterCount >= 4) {
+          const spm = SP[Math.min(scatterCount, 6)] || 3;
+          totalWin += Math.floor(bet * spm);
+        }
+
+        // Free Spins Trigger / Retrigger:
+        // Base Game: 4+ Scatters awards 15 Free Spins
+        // Free Spins: 3+ Scatters awards +5 Free Spins (Retrigger!)
+        const triggerFreeSpins = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
+        const freeSpinsAwarded = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0);
+
+        // Max Win Cap for Gates of Olympus (5,000x bet)
+        const maxWinCap = bet * 5000;
+        if (totalWin > maxWinCap) totalWin = maxWinCap;
+
+        // Persist User Balance
+        if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const newBalance = isGuestMode
-          ? guestBalance + Math.floor(totalWinAmount)
+          ? guestBalance + Math.floor(totalWin)
           : (user.coins || 0) + (user.bonusCoins || 0);
 
+        // Win Type Classification (Big Win >= 5x, Mega Win >= 12x, Super Win >= 30x)
+        const winRatio = totalWin / bet;
+        const winType = winRatio >= 30 ? 'super_win' : winRatio >= 12 ? 'mega_win' : winRatio >= 5 ? 'big_win' : totalWin > 0 ? 'win' : 'normal';
+
         socket.emit('zeus_result', {
-          freeMult: isFreeSpins ? _ms.freeMult : 0,
+          freeMult: isFreeSpins ? Math.max(1, _ms.freeMult || 1) : 0,
+          appliedMultiplier: finalMultiplier,
+          roundOrbsSum: spinOrbsSum,
           grid: gridHistory[0],
           finalGrid: currentGrid,
           gridHistory,
           multGrid,
-          totalWinAmount: Math.floor(totalWinAmount),
+          baseTumbleWin,
+          totalWinAmount: Math.floor(totalWin),
           clusterWins,
           tumbleCount,
           allWinPositions,
           newBalance,
           coins: user ? user.coins : newBalance,
           bonusCoins: user ? (user.bonusCoins || 0) : 0,
-          triggerFreeSpins: freeSpinsAwarded > 0,
+          triggerFreeSpins,
           freeSpinsAwarded,
           scatterCount,
-          randomMult,
-          winType: totalWinAmount > betAmount * 100 ? 'mega_win' : totalWinAmount > betAmount * 30 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
+          randomMult: spinOrbsSum > 0 ? spinOrbsSum : null,
+          winType
         });
 
       } catch (err) {
@@ -2631,8 +2721,8 @@ function initSocketIO(io) {
         const _lm = applyLineMultiplier(socket, 'wildwest', isFreeSpins, totalWinAmount);
         totalWinAmount = totalWinAmount * _lm.mult;
 
-        const triggerFreeSpins = scatterCount >= 3;
-        const freeSpinsAwarded = triggerFreeSpins ? 8 : 0;
+        const triggerFreeSpins = isFreeSpins ? (scatterCount >= 2) : (scatterCount >= 3);
+        const freeSpinsAwarded = isFreeSpins ? (scatterCount >= 3 ? 8 : scatterCount === 2 ? 4 : 0) : (scatterCount >= 3 ? 8 : 0);
 
         if (user) user.coins += Math.floor(totalWinAmount);
         if (!isGuestMode && user) await user.save();
@@ -2777,7 +2867,8 @@ function initSocketIO(io) {
         }
         const spm = SP[Math.min(scatterCount, 6)] || 0;
         if (spm > 0) totalWin += betAmount * spm;
-        const tf = scatterCount >= 4, fa = tf ? 15 : 0;
+        const tf = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
+        const fa = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 10 : 0);
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : (user.coins || 0) + (user.bonusCoins || 0);
