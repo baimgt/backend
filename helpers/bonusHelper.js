@@ -2,7 +2,7 @@ const InboxMessage = require('../models/InboxMessage');
 
 /**
  * Checks if user's bonus coins have expired.
- * If expired, deducts the unspent bonus coins, resets bonusCoins, and sends an Inbox alert.
+ * If expired, resets bonusCoins to 0 and sends an Inbox alert (does NOT deduct regular coins).
  */
 async function checkAndCleanExpiredBonus(user) {
   if (!user) return false;
@@ -11,8 +11,7 @@ async function checkAndCleanExpiredBonus(user) {
   if (user.bonusCoins > 0 && user.bonusCoinsExpireAt && now > new Date(user.bonusCoinsExpireAt)) {
     const expiredAmount = user.bonusCoins;
     
-    // Deduct expired bonus coins
-    user.coins = Math.max(0, user.coins - expiredAmount);
+    // Only reset bonusCoins (do NOT deduct regular coins, since bonusCoins is separate)
     user.bonusCoins = 0;
     user.bonusCoinsExpireAt = null;
     
@@ -23,8 +22,8 @@ async function checkAndCleanExpiredBonus(user) {
       toUsername: user.username,
       fromUsername: 'SISTEM',
       type: 'system',
-      title: '⏰ Bonus Koin Hangus!',
-      body: `Bonus koin sebanyak ${expiredAmount.toLocaleString('id-ID')} koin telah HANGUS karena tidak digunakan dalam 24 jam. Klaim bonus harian baru hari ini & gunakan sebelum hangus!`,
+      title: '⏰ Bonus Koin Slot Hangus!',
+      body: `Bonus koin slot sebanyak ${expiredAmount.toLocaleString('id-ID')} koin telah HANGUS karena tidak digunakan dalam 24 jam. Klaim bonus harian baru hari ini & putar di game slot untuk mengubahnya menjadi koin universal!`,
       icon: '⏰',
       isRead: false
     }).catch(() => {});
@@ -35,19 +34,20 @@ async function checkAndCleanExpiredBonus(user) {
 }
 
 /**
- * When user spends coins (playing slots, billiard, domino, or transfer),
- * deduct from bonusCoins first so bonus coins are saved from expiring!
+ * When user spends coins on slot games:
+ * Deducts from bonusCoins first. If bonusCoins is insufficient, deducts remainder from regular coins.
  */
-function spendUserCoins(user, amountSpent) {
+function spendSlotCoins(user, amountSpent) {
   if (!user || amountSpent <= 0) return;
 
-  if (user.bonusCoins > 0) {
-    if (user.bonusCoins >= amountSpent) {
-      user.bonusCoins -= amountSpent;
-    } else {
-      user.bonusCoins = 0;
-      user.bonusCoinsExpireAt = null;
-    }
+  const bonus = user.bonusCoins || 0;
+  if (bonus >= amountSpent) {
+    user.bonusCoins -= amountSpent;
+  } else {
+    const remainder = amountSpent - bonus;
+    user.bonusCoins = 0;
+    user.bonusCoinsExpireAt = null;
+    user.coins = Math.max(0, (user.coins || 0) - remainder);
   }
 
   if (user.bonusCoins === 0) {
@@ -55,7 +55,13 @@ function spendUserCoins(user, amountSpent) {
   }
 }
 
+// Alias for backwards compatibility
+function spendUserCoins(user, amountSpent) {
+  return spendSlotCoins(user, amountSpent);
+}
+
 module.exports = {
   checkAndCleanExpiredBonus,
+  spendSlotCoins,
   spendUserCoins
 };

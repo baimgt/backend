@@ -2,7 +2,7 @@
 // GAME MANAGER — Server-side game state & matchmaking
 // =====================================================
 const User = require('./models/User');
-const { spendUserCoins } = require('./helpers/bonusHelper');
+const { spendUserCoins, spendSlotCoins, checkAndCleanExpiredBonus } = require('./helpers/bonusHelper');
 
 // Active waiting rooms: Map<roomKey, WaitingRoom>
 const waitingRooms = new Map();
@@ -108,11 +108,11 @@ class WaitingRoom {
 
     try {
       const user = await User.findOne({ username });
-      const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
-      if (!user || usableCoins < requiredBuyIn) {
+      const regularCoins = user ? (user.coins || 0) : 0;
+      if (!user || regularCoins < requiredBuyIn) {
         this.players = this.players.filter(p => p !== tempPlayer);
-        if (user && user.bonusCoins > 0 && user.coins >= requiredBuyIn) {
-          socket.emit('error-msg', `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya bisa digunakan untuk game SLOT!\n\nKoin umum Domino Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin).`);
+        if (user && user.bonusCoins > 0 && (regularCoins + user.bonusCoins) >= requiredBuyIn) {
+          socket.emit('error-msg', `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya bisa digunakan untuk game SLOT!\n\nKoin umum Domino Anda: ${regularCoins.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin). Putar di game slot untuk mengubah bonus menjadi koin universal!`);
         } else {
           socket.emit('error-msg', `⚠️ KOIN TIDAK CUKUP! Membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin untuk taruhan.`);
         }
@@ -1135,20 +1135,20 @@ function initSocketIO(io) {
           User.findOne({ username: partnerUsername })
         ]);
 
-        const hostUsable = Math.max(0, (hostUser ? hostUser.coins : 0) - ((hostUser && hostUser.bonusCoins) || 0));
-        if (!hostUser || hostUsable < requiredBuyIn) {
-          const msg = hostUser && hostUser.bonusCoins > 0 && hostUser.coins >= requiredBuyIn
-            ? `⚠️ KOIN ANDA TIDAK CUKUP UNTUK DOMINO!\n\nKoin bonus harian hanya untuk bermain Slot. Koin umum Domino Anda: ${hostUsable.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin).`
+        const hostCoins = hostUser ? (hostUser.coins || 0) : 0;
+        if (!hostUser || hostCoins < requiredBuyIn) {
+          const msg = hostUser && hostUser.bonusCoins > 0 && (hostCoins + hostUser.bonusCoins) >= requiredBuyIn
+            ? `⚠️ KOIN ANDA TIDAK CUKUP UNTUK DOMINO!\n\nKoin bonus harian hanya untuk bermain Slot. Koin umum Domino Anda: ${hostCoins.toLocaleString('id-ID')} koin (Butuh: ${requiredBuyIn.toLocaleString('id-ID')} koin). Putar di game slot untuk mengubah bonus menjadi koin universal!`
             : `⚠️ KOIN ANDA TIDAK CUKUP!\n\nAnda membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin untuk masuk kamar ${roomConfig.name}.`;
           socket.emit('team-join-error', { message: msg });
           return;
         }
 
-        const partnerUsable = Math.max(0, (partnerUser ? partnerUser.coins : 0) - ((partnerUser && partnerUser.bonusCoins) || 0));
-        if (!partnerUser || partnerUsable < requiredBuyIn) {
-          const partnerCoins = partnerUsable.toLocaleString('id-ID');
+        const partnerCoins = partnerUser ? (partnerUser.coins || 0) : 0;
+        if (!partnerUser || partnerCoins < requiredBuyIn) {
+          const partnerCoinsStr = partnerCoins.toLocaleString('id-ID');
           socket.emit('team-join-error', {
-            message: `⚠️ KOIN TEMAN SETIM TIDAK CUKUP!\n\nTeman setim Anda (${partnerUsername}) hanya memiliki ${partnerCoins} koin umum Domino, tetapi kamar ${roomConfig.name} membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin.`
+            message: `⚠️ KOIN TEMAN SETIM TIDAK CUKUP!\n\nTeman setim Anda (${partnerUsername}) hanya memiliki ${partnerCoinsStr} koin umum Domino, tetapi kamar ${roomConfig.name} membutuhkan minimal ${requiredBuyIn.toLocaleString('id-ID')} koin.`
           });
           return;
         }
@@ -1330,8 +1330,8 @@ function initSocketIO(io) {
     socket.on('spin_slot', async ({ username, betAmount }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          socket.emit('spin_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          socket.emit('spin_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
           return;
         }
 
@@ -1341,14 +1341,16 @@ function initSocketIO(io) {
           return;
         }
 
-        if (user.coins < bet) {
+        await checkAndCleanExpiredBonus(user);
+
+        const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+        if (totalAvailable < bet) {
           socket.emit('spin_error', { message: 'Koin tidak cukup!' });
           return;
         }
 
-        // 1. Deduct bet (consume daily bonusCoins first if playing slot)
-        spendUserCoins(user, bet);
-        user.coins -= bet;
+        // Deduct bet (consume daily bonusCoins first if playing slot)
+        spendSlotCoins(user, bet);
 
         // 2. Track loss streak (HDI-style forced win mechanic)
         const streak = userLossStreak.get(username) || 0;
@@ -1494,7 +1496,9 @@ function initSocketIO(io) {
           winAmount,
           totalWinMult,
           winningSymbols,
-          newBalance: user.coins,
+          newBalance: (user.coins || 0) + (user.bonusCoins || 0),
+          coins: user.coins,
+          bonusCoins: user.bonusCoins || 0,
           winType
         });
 
@@ -1513,8 +1517,8 @@ function initSocketIO(io) {
     socket.on('spin_zeus', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, freeSpinMult, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          socket.emit('zeus_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          socket.emit('zeus_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
           return;
         }
 
@@ -1531,10 +1535,14 @@ function initSocketIO(io) {
           }
           if (!isFreeSpins) guestBalance -= betDeduction;
         } else {
-          if (!isFreeSpins && user.coins < betDeduction) { socket.emit('zeus_error', { message: 'Koin tidak cukup!' }); return; }
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (!isFreeSpins && totalAvailable < betDeduction) {
+            socket.emit('zeus_error', { message: 'Koin tidak cukup!' });
+            return;
+          }
           if (!isFreeSpins) {
-            spendUserCoins(user, betDeduction);
-            user.coins -= betDeduction;
+            spendSlotCoins(user, betDeduction);
           }
         }
 
@@ -1715,7 +1723,7 @@ function initSocketIO(io) {
         if (!isGuestMode && user) await user.save();
         const newBalance = isGuestMode
           ? guestBalance + Math.floor(totalWinAmount)
-          : user.coins;
+          : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('zeus_result', {
           freeMult: isFreeSpins ? _ms.freeMult : 0,
@@ -1728,6 +1736,8 @@ function initSocketIO(io) {
           tumbleCount,
           allWinPositions,
           newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           triggerFreeSpins: freeSpinsAwarded > 0,
           freeSpinsAwarded,
           scatterCount,
@@ -1748,8 +1758,8 @@ function initSocketIO(io) {
     socket.on('spin_fafafa', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          return socket.emit('fafafa_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          return socket.emit('fafafa_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
         }
 
         let user = await User.findOne({ username });
@@ -1761,18 +1771,16 @@ function initSocketIO(io) {
           if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('fafafa_error', { message: 'Koin tidak cukup' });
           }
+          if (!isFreeSpins) guestBalance -= bet;
         } else {
-          if (user.coins < bet && !isFreeSpins) {
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < bet && !isFreeSpins) {
             return socket.emit('fafafa_error', { message: 'Koin tidak cukup' });
           }
-        }
-
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, bet);
-            user.coins -= bet;
+          if (!isFreeSpins) {
+            spendSlotCoins(user, bet);
           }
-          else guestBalance -= bet;
         }
 
         // Generate 5x3 grid
@@ -1924,7 +1932,7 @@ function initSocketIO(io) {
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
         
-        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
+        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('fafafa_result', {
           multiplier: _lm.info,
@@ -1936,7 +1944,9 @@ function initSocketIO(io) {
           triggerFreeSpins: freeSpinsAwarded > 0,
           freeSpinsAwarded,
           scatterCount,
-          newBalance
+          newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0
         });
 
       } catch (err) {
@@ -1951,8 +1961,8 @@ function initSocketIO(io) {
     socket.on('spin_fivelions', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          return socket.emit('fivelions_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          return socket.emit('fivelions_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
         }
 
         let user = await User.findOne({ username });
@@ -1966,18 +1976,16 @@ function initSocketIO(io) {
           if (guestBalance < betDeduction && !isFreeSpins) {
             return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
           }
+          if (!isFreeSpins) guestBalance -= betDeduction;
         } else {
-          if (user.coins < betDeduction && !isFreeSpins) {
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < betDeduction && !isFreeSpins) {
             return socket.emit('fivelions_error', { message: 'Koin tidak cukup' });
           }
-        }
-
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, betDeduction);
-            user.coins -= betDeduction;
+          if (!isFreeSpins) {
+            spendSlotCoins(user, betDeduction);
           }
-          else guestBalance -= betDeduction;
         }
 
         // Generate 6x3 grid
@@ -2032,7 +2040,7 @@ function initSocketIO(io) {
         if (user) user.coins += totalWinAmount;
         if (!isGuestMode && user) await user.save();
 
-        const newBalance = isGuestMode ? guestBalance + totalWinAmount : user.coins;
+        const newBalance = isGuestMode ? guestBalance + totalWinAmount : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('fivelions_result', {
           wildMultiplier,
@@ -2041,7 +2049,9 @@ function initSocketIO(io) {
           totalWinAmount,
           triggerFreeSpins: scatterCount >= 3,
           scatterCount,
-          newBalance
+          newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0
         });
       } catch (err) {
         console.error('5 Lions error:', err);
@@ -2055,8 +2065,8 @@ function initSocketIO(io) {
     socket.on('spin_jinji', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          return socket.emit('jinji_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          return socket.emit('jinji_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
         }
 
         let user = await User.findOne({ username });
@@ -2068,18 +2078,16 @@ function initSocketIO(io) {
           if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('jinji_error', { message: 'Koin tidak cukup' });
           }
+          if (!isFreeSpins) guestBalance -= bet;
         } else {
-          if (user.coins < bet && !isFreeSpins) {
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < bet && !isFreeSpins) {
             return socket.emit('jinji_error', { message: 'Koin tidak cukup' });
           }
-        }
-
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, bet);
-            user.coins -= bet;
+          if (!isFreeSpins) {
+            spendSlotCoins(user, bet);
           }
-          else guestBalance -= bet;
         }
 
         // Weighted symbol picker (ONLY symbols 0-7 from user-provided images)
@@ -2208,7 +2216,7 @@ function initSocketIO(io) {
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
 
-        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
+        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('jinji_result', {
           multGrid,
@@ -2222,6 +2230,8 @@ function initSocketIO(io) {
           triggerFreeSpins,
           freeSpinsAwarded,
           newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           winType: totalWinAmount > bet * 100 ? 'mega_win' : totalWinAmount > bet * 30 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
         });
 
@@ -2237,8 +2247,8 @@ function initSocketIO(io) {
     socket.on('spin_mahjong', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) {
-          return socket.emit('mahjong_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
+          return socket.emit('mahjong_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
         }
 
         let user = await User.findOne({ username });
@@ -2250,18 +2260,16 @@ function initSocketIO(io) {
           if (guestBalance < bet && !isFreeSpins) {
             return socket.emit('mahjong_error', { message: 'Koin tidak cukup' });
           }
+          if (!isFreeSpins) guestBalance -= bet;
         } else {
-          if (user.coins < bet && !isFreeSpins) {
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < bet && !isFreeSpins) {
             return socket.emit('mahjong_error', { message: 'Koin tidak cukup' });
           }
-        }
-
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, bet);
-            user.coins -= bet;
+          if (!isFreeSpins) {
+            spendSlotCoins(user, bet);
           }
-          else guestBalance -= bet;
         }
 
         // Weighted symbol picker for Mahjong 2 (Authentic PG Soft odds)
@@ -2438,7 +2446,7 @@ function initSocketIO(io) {
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
 
-        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
+        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('mahjong_result', {
           freeMult: isFreeSpins ? _ms.freeMult : 0,
@@ -2450,6 +2458,8 @@ function initSocketIO(io) {
           triggerFreeSpins,
           freeSpinsAwarded,
           newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           winType: totalWinAmount > betAmount * 100 ? 'mega_win' : totalWinAmount > betAmount * 30 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
         });
 
@@ -2467,7 +2477,7 @@ function initSocketIO(io) {
     socket.on('spin_wildwest', async ({ username, betAmount, isFreeSpins, stickyWilds = [], clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('wildwest_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('wildwest_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
@@ -2476,15 +2486,13 @@ function initSocketIO(io) {
         if (!user) {
           isGuestMode = true;
           if (guestBalance < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
+          if (!isFreeSpins) guestBalance -= bet;
         } else {
-          if (user.coins < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
-        }
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, bet);
-            user.coins -= bet;
-          } else {
-            guestBalance -= bet;
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < bet && !isFreeSpins) return socket.emit('wildwest_error', { message: 'Koin tidak cukup' });
+          if (!isFreeSpins) {
+            spendSlotCoins(user, bet);
           }
         }
 
@@ -2628,7 +2636,7 @@ function initSocketIO(io) {
 
         if (user) user.coins += Math.floor(totalWinAmount);
         if (!isGuestMode && user) await user.save();
-        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : user.coins;
+        const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('wildwest_result', {
           multiplier: _lm.info,
@@ -2640,6 +2648,8 @@ function initSocketIO(io) {
           freeSpinsAwarded,
           newStickyWilds,
           newBalance,
+          coins: user ? user.coins : newBalance,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           winType: totalWinAmount > betAmount * 50 ? 'mega_win' : totalWinAmount > betAmount * 15 ? 'big_win' : totalWinAmount > 0 ? 'win' : 'normal'
         });
 
@@ -2655,7 +2665,7 @@ function initSocketIO(io) {
     socket.on('spin_candy', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('candy_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('candy_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
@@ -2666,15 +2676,13 @@ function initSocketIO(io) {
         if (!user) {
           isGuestMode = true;
           if (guestBalance < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
+          if (!isFreeSpins) guestBalance -= betDeduction;
         } else {
-          if (user.coins < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
-        }
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, betDeduction);
-            user.coins -= betDeduction;
-          } else {
-            guestBalance -= betDeduction;
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < betDeduction && !isFreeSpins) return socket.emit('candy_error', { message: 'Koin tidak cukup' });
+          if (!isFreeSpins) {
+            spendSlotCoins(user, betDeduction);
           }
         }
 
@@ -2772,11 +2780,13 @@ function initSocketIO(io) {
         const tf = scatterCount >= 4, fa = tf ? 15 : 0;
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
-        const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : user.coins;
+        const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : (user.coins || 0) + (user.bonusCoins || 0);
         socket.emit('candy_result', {
           freeMult: isFreeSpins ? _ms.freeMult : 0,
           initialGrid: ig, initialMultGrid: imr, tumbleSteps, scatterCount,
           totalWinAmount: Math.floor(totalWin), triggerFreeSpins: tf, freeSpinsAwarded: fa, newBalance: nb,
+          coins: user ? user.coins : nb,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           winType: totalWin > betAmount * 100 ? 'mega_win' : totalWin > betAmount * 20 ? 'big_win' : totalWin > 0 ? 'win' : 'normal'
         });
       } catch (err) {
@@ -2831,10 +2841,10 @@ function initSocketIO(io) {
       try {
         const bet = parseInt(betAmount, 10) || 100000;
         const user = await User.findOne({ username });
-        const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
-        if (!user || usableCoins < bet) {
-          const msg = user && user.bonusCoins > 0 && user.coins >= bet
-            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin).`
+        const regularCoins = user ? (user.coins || 0) : 0;
+        if (!user || regularCoins < bet) {
+          const msg = user && user.bonusCoins > 0 && (regularCoins + user.bonusCoins) >= bet
+            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${regularCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin). Putar di game slot untuk mengubah bonus menjadi koin universal!`
             : `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.`;
           socket.emit('byone_room_error', { message: msg });
           return;
@@ -2899,11 +2909,10 @@ function initSocketIO(io) {
           return;
         }
 
-        const joiningUser = await User.findOne({ username });
-        const usableCoins = Math.max(0, (joiningUser ? joiningUser.coins : 0) - ((joiningUser && joiningUser.bonusCoins) || 0));
-        if (!joiningUser || usableCoins < roomData.betAmount) {
-          const msg = joiningUser && joiningUser.bonusCoins > 0 && joiningUser.coins >= roomData.betAmount
-            ? `⚠️ Koin klaim bonus harian (${(joiningUser.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${roomData.betAmount.toLocaleString('id-ID')} koin).`
+        const regularCoins = joiningUser ? (joiningUser.coins || 0) : 0;
+        if (!joiningUser || regularCoins < roomData.betAmount) {
+          const msg = joiningUser && joiningUser.bonusCoins > 0 && (regularCoins + joiningUser.bonusCoins) >= roomData.betAmount
+            ? `⚠️ Koin klaim bonus harian (${(joiningUser.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin By One Anda: ${regularCoins.toLocaleString('id-ID')} koin (Butuh: ${roomData.betAmount.toLocaleString('id-ID')} koin). Putar di game slot untuk mengubah bonus menjadi koin universal!`
             : `Koin Anda tidak cukup! Butuh minimal ${roomData.betAmount.toLocaleString('id-ID')} koin.`;
           socket.emit('byone_room_error', { message: msg });
           return;
@@ -3030,10 +3039,10 @@ function initSocketIO(io) {
       try {
         const bet = parseInt(betAmount, 10) || 50000;
         const user = await User.findOne({ username });
-        const usableCoins = Math.max(0, (user ? user.coins : 0) - ((user && user.bonusCoins) || 0));
-        if (!user || usableCoins < bet) {
-          const msg = user && user.bonusCoins > 0 && user.coins >= bet
-            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin duel Anda: ${usableCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin).`
+        const regularCoins = user ? (user.coins || 0) : 0;
+        if (!user || regularCoins < bet) {
+          const msg = user && user.bonusCoins > 0 && (regularCoins + user.bonusCoins) >= bet
+            ? `⚠️ Koin klaim bonus harian (${(user.bonusCoins || 0).toLocaleString('id-ID')} koin) hanya untuk game SLOT! Koin duel Anda: ${regularCoins.toLocaleString('id-ID')} koin (Butuh: ${bet.toLocaleString('id-ID')} koin). Putar di game slot untuk mengubah bonus menjadi koin universal!`
             : `Koin tidak cukup! Butuh minimal ${bet.toLocaleString('id-ID')} koin.`;
           socket.emit('byone_error', { message: msg });
           return;
@@ -3272,7 +3281,7 @@ function initSocketIO(io) {
     socket.on('spin_gatokaca', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
         const bet = Number(betAmount);
-        if (!Number.isFinite(bet) || bet <= 0) return socket.emit('gatokaca_error', { message: 'Jumlah taruhan tidak valid' });
+        if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('gatokaca_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
         let user = await User.findOne({ username });
         let isGuestMode = false;
@@ -3285,18 +3294,16 @@ function initSocketIO(io) {
           if (guestBalance < betDeduction && !isFreeSpins) {
             return socket.emit('gatokaca_error', { message: 'Koin tidak cukup' });
           }
+          if (!isFreeSpins) guestBalance -= betDeduction;
         } else {
-          if (user.coins < betDeduction && !isFreeSpins) {
+          await checkAndCleanExpiredBonus(user);
+          const totalAvailable = (user.coins || 0) + (user.bonusCoins || 0);
+          if (totalAvailable < betDeduction && !isFreeSpins) {
             return socket.emit('gatokaca_error', { message: 'Koin tidak cukup' });
           }
-        }
-
-        if (!isFreeSpins) {
-          if (user) {
-            spendUserCoins(user, betDeduction);
-            user.coins -= betDeduction;
+          if (!isFreeSpins) {
+            spendSlotCoins(user, betDeduction);
           }
-          else guestBalance -= betDeduction;
         }
 
         const ROWS = 5, COLS = 6;
@@ -3513,7 +3520,7 @@ function initSocketIO(io) {
 
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
-        const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : user.coins;
+        const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : (user.coins || 0) + (user.bonusCoins || 0);
 
         socket.emit('gatokaca_result', {
           appliedMultiplier: finalMultiplier,
@@ -3523,7 +3530,10 @@ function initSocketIO(io) {
           totalWinAmount: Math.floor(totalWin),
           initialGrid: ig, initialMultGrid: imr, tumbleSteps, scatterCount,
           triggerFreeSpins: tf,
-          freeSpinsAwarded: fa, newBalance: nb,
+          freeSpinsAwarded: fa,
+          newBalance: nb,
+          coins: user ? user.coins : nb,
+          bonusCoins: user ? (user.bonusCoins || 0) : 0,
           winType: totalWin > betAmount * 100 ? 'mega_win' : totalWin > betAmount * 20 ? 'big_win' : totalWin > 0 ? 'win' : 'normal'
         });
 

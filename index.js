@@ -9,6 +9,7 @@ const inboxController = require('./controllers/inboxController');
 const bonusController = require('./controllers/bonusController');
 const shopController = require('./controllers/shopController');
 const transferController = require('./controllers/transferController');
+const adminController = require('./controllers/adminController');
 const { initSocketIO } = require('./gameManager');
 
 const app = express();
@@ -30,7 +31,8 @@ const rateLimit = require('express-rate-limit');
 
 app.use(helmet({
   crossOriginResourcePolicy: false,
-  crossOriginOpenerPolicy: false
+  crossOriginOpenerPolicy: false,
+  contentSecurityPolicy: false
 }));
 
 // Rate limiter: mencegah serangan DDoS, spamming, dan brute-force API
@@ -107,6 +109,12 @@ app.post('/api/shop/buy-avatar',                  shopController.buyAvatar);
 app.post('/api/shop/buy-vip',                     shopController.buyVip);
 app.post('/api/shop/convert-rp',                  shopController.convertRp);
 app.post('/api/shop/verify-playstore-purchase',    shopController.verifyPlayStorePurchase);
+
+// Admin & Dashboard routes
+app.get('/admin',                                  adminController.renderDashboard);
+app.get('/api/admin/users',                        adminController.getUsers);
+app.post('/api/admin/set-role',                    adminController.setRole);
+app.post('/api/admin/adjust-coins',                adminController.adjustCoins);
 
 // Initialize Socket.IO game events
 initSocketIO(io);

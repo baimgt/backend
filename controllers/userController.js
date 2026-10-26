@@ -102,7 +102,13 @@ exports.getProfile = async (req, res) => {
 exports.getLeaderboard = async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
-    const users = await User.find({}, 'username userId avatar coins vipLevel')
+    // Filter: kecualikan akun dengan role 'admin' atau isAdmin: true agar tidak pernah muncul di leaderboard
+    const nonAdminFilter = {
+      role: { $ne: 'admin' },
+      isAdmin: { $ne: true }
+    };
+
+    const users = await User.find(nonAdminFilter, 'username userId avatar coins vipLevel')
       .sort({ coins: -1, _id: 1 })
       .limit(limit)
       .lean();
@@ -123,17 +129,33 @@ exports.getLeaderboard = async (req, res) => {
       if (mine) {
         me = mine;
       } else {
-        const user = await User.findOne({ username }, 'username userId avatar coins vipLevel').lean();
+        const user = await User.findOne({ username }, 'username userId avatar coins vipLevel role isAdmin').lean();
         if (user) {
-          const ahead = await User.countDocuments({ coins: { $gt: user.coins || 0 } });
-          me = {
-            rank: ahead + 1,
-            username: user.username,
-            userId: user.userId || '',
-            avatar: user.avatar,
-            coins: user.coins || 0,
-            vipLevel: user.vipLevel || 0
-          };
+          // Jika akun adalah admin, jangan berikan ranking pemain biasa
+          if (user.role === 'admin' || user.isAdmin === true) {
+            me = {
+              rank: '-',
+              username: user.username,
+              userId: user.userId || '',
+              avatar: user.avatar,
+              coins: user.coins || 0,
+              vipLevel: user.vipLevel || 0,
+              isAdmin: true
+            };
+          } else {
+            const ahead = await User.countDocuments({
+              ...nonAdminFilter,
+              coins: { $gt: user.coins || 0 }
+            });
+            me = {
+              rank: ahead + 1,
+              username: user.username,
+              userId: user.userId || '',
+              avatar: user.avatar,
+              coins: user.coins || 0,
+              vipLevel: user.vipLevel || 0
+            };
+          }
         }
       }
     }
@@ -365,12 +387,11 @@ exports.transferCoins = async (req, res) => {
       return res.status(400).json({ error: 'Tidak bisa mengirim koin ke diri sendiri' });
     }
 
-    // Check sender coins excluding slot-only bonus coins
-    const usableCoins = Math.max(0, sender.coins - (sender.bonusCoins || 0));
-    if (usableCoins < transferAmount) {
-      if (sender.bonusCoins > 0 && sender.coins >= transferAmount) {
+    // Check sender regular coins (bonusCoins is strictly for slot and cannot be transferred)
+    if (sender.coins < transferAmount) {
+      if (sender.bonusCoins > 0 && (sender.coins + sender.bonusCoins) >= transferAmount) {
         return res.status(400).json({
-          error: 'Koin dari klaim bonus harian hanya dapat digunakan untuk bermain Slot dan tidak dapat ditransfer!'
+          error: 'Koin dari klaim bonus harian hanya dapat digunakan untuk bermain Slot dan tidak dapat ditransfer ke pemain lain!'
         });
       }
       return res.status(400).json({ error: 'Koin tidak mencukupi untuk transfer' });
@@ -453,21 +474,23 @@ exports.updateCoins = async (req, res) => {
 
       if (!isSlot) {
         // Non-slot games (Domino, QiuQiu, Billiard, By One) CANNOT use daily bonus coins!
-        const generalCoins = Math.max(0, user.coins - (user.bonusCoins || 0));
-        if (generalCoins < deduct) {
-          if (user.bonusCoins > 0 && user.coins >= deduct) {
+        if (user.coins < deduct) {
+          if (user.bonusCoins > 0 && (user.coins + user.bonusCoins) >= deduct) {
             return res.status(400).json({
               error: 'Koin dari klaim bonus harian hanya dapat digunakan untuk game SLOT! Koin umum Anda tidak mencukupi.'
             });
           }
           return res.status(400).json({ error: 'Koin tidak mencukupi' });
         }
-        // Deduct from total coins without consuming slot bonusCoins
+        // Deduct from regular coins
         user.coins = Math.max(0, user.coins - deduct);
       } else {
-        // Slot games: consume bonusCoins first
+        // Slot games: consume bonusCoins first, then remainder from coins
+        const totalAvail = (user.coins || 0) + (user.bonusCoins || 0);
+        if (totalAvail < deduct) {
+          return res.status(400).json({ error: 'Koin tidak mencukupi' });
+        }
         spendUserCoins(user, deduct);
-        user.coins = Math.max(0, user.coins - deduct);
       }
     } else {
       user.coins = Math.max(0, user.coins + updateAmount);
@@ -476,7 +499,9 @@ exports.updateCoins = async (req, res) => {
 
     res.json({
       message: 'Koin berhasil diperbarui',
-      coins: user.coins
+      coins: user.coins,
+      bonusCoins: user.bonusCoins || 0,
+      totalCoins: (user.coins || 0) + (user.bonusCoins || 0)
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

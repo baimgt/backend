@@ -62,12 +62,11 @@ exports.claimDailyBonus = async (req, res) => {
       return res.status(400).json({ error: 'Bonus harian hari ini sudah diklaim! Kembalilah besok.' });
     }
 
-    // Give 5K coins
+    // Give 5K bonus coins (strictly for slot games only)
     const coins = DAILY_REWARD_COINS;
-    user.coins     += coins;
     user.lastDailyBonus = now;
 
-    // Bonus coins expire in 24 hours
+    // Bonus coins expire in 24 hours - ONLY added to bonusCoins, NOT to general coins!
     user.bonusCoins         = (user.bonusCoins || 0) + coins;
     user.bonusCoinsExpireAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
@@ -78,14 +77,14 @@ exports.claimDailyBonus = async (req, res) => {
       toUsername:   username,
       fromUsername: 'SISTEM',
       type:         'gift',
-      title:        '🎁 Bonus Harian!',
-      body:         `Selamat! Anda telah mengklaim bonus harian +${coins.toLocaleString('id-ID')} koin. Gunakan dalam 24 jam sebelum hangus!`,
+      title:        '🎁 Bonus Harian Khusus Slot!',
+      body:         `Selamat! Anda telah mengklaim bonus harian +${coins.toLocaleString('id-ID')} bonus koin slot. Bonus ini khusus untuk bermain game slot. Kemenangan dari slot akan menjadi koin biasa yang dapat dipakai di semua game dan bisa dikirim ke teman! Gunakan dalam 24 jam sebelum hangus.`,
       icon:         '🎁',
       isRead:       false
     }).catch(() => {});
 
     res.json({
-      message: `Berhasil mengklaim +${coins.toLocaleString('id-ID')} koin!`,
+      message: `Berhasil mengklaim +${coins.toLocaleString('id-ID')} bonus koin slot!`,
       coins:   user.coins,
       dailyReward: coins,
       lastDailyBonus: user.lastDailyBonus,
