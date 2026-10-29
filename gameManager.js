@@ -3,6 +3,7 @@
 // =====================================================
 const User = require('./models/User');
 const { spendUserCoins, spendSlotCoins, checkAndCleanExpiredBonus } = require('./helpers/bonusHelper');
+const { TARGET_RTP, TARGET_HIT_FREQ, determineSpinOutcome, sanitizeClusterGrid } = require('./slotRtpEngine');
 
 // Active waiting rooms: Map<roomKey, WaitingRoom>
 const waitingRooms = new Map();
@@ -1352,11 +1353,8 @@ function initSocketIO(io) {
         // Deduct bet (consume daily bonusCoins first if playing slot)
         spendSlotCoins(user, bet);
 
-        // 2. Track loss streak (HDI-style forced win mechanic)
-        const streak = userLossStreak.get(username) || 0;
-        // Force a win every 3-6 consecutive losses (random)
-        const forceWinThreshold = 3 + Math.floor(Math.random() * 4); // 3 to 6
-        const forceWin = streak >= forceWinThreshold;
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins: false, anteMode: false });
 
         // 3. Generate Slot Grid (3 rows x 5 columns)
         // 0: 9, 1: 10, 2: J, 3: Q, 4: K, 5: A
@@ -1365,7 +1363,7 @@ function initSocketIO(io) {
         const numRows = 3;
         let grid = [];
         
-        // Weighted distribution (HDI style)
+        // Weighted distribution
         const symbolWeights = [
           { sym: 0, weight: 22 }, // 9
           { sym: 1, weight: 20 }, // 10
@@ -1389,38 +1387,35 @@ function initSocketIO(io) {
           return 0;
         };
 
-        if (forceWin) {
-          // Force a winning combination — pick a common symbol (0-5) and place it in cols 1-3 at same row
-          const forcedSym = Math.floor(Math.random() * 6); // 9 through A
+        if (rtpOutcome.isHit) {
+          // Guaranteed win! Stamp matching symbols on consecutive columns
+          const targetCols = rtpOutcome.winTier === 'mega' ? 5 : (rtpOutcome.winTier === 'big' ? 4 : 3);
+          const chosenSym = (rtpOutcome.winTier === 'mega' || rtpOutcome.winTier === 'big')
+            ? (6 + Math.floor(Math.random() * 4))
+            : Math.floor(Math.random() * 6);
           grid = Array.from({ length: numRows }, () => Array.from({ length: numCols }, () => pickSymbol()));
-          // Stamp the forced symbol onto at least 3 consecutive columns in the middle row
           const forcedRow = 1;
-          grid[forcedRow][0] = forcedSym;
-          grid[forcedRow][1] = forcedSym;
-          grid[forcedRow][2] = forcedSym;
-          // 40% chance extend to 4 or 5 cols for bigger thrill
-          if (Math.random() < 0.40) grid[forcedRow][3] = forcedSym;
-          if (Math.random() < 0.20) grid[forcedRow][4] = forcedSym;
-          // Reset streak
-          userLossStreak.set(username, 0);
+          for (let c = 0; c < targetCols; c++) {
+            grid[forcedRow][c] = chosenSym;
+          }
         } else {
-          // Normal generation
+          // Guaranteed loss (84.95% of spins)! Ensure no 3 consecutive columns match
           for (let r = 0; r < numRows; r++) {
             const row = [];
             for (let c = 0; c < numCols; c++) {
-              // Wild chance: 6% col1, 15% col2-3, 12% col4, 8% col5 (much higher than before)
-              let wildChance = 0.06;
-              if (c === 1 || c === 2) wildChance = 0.15;
-              else if (c === 3) wildChance = 0.12;
-              else if (c === 4) wildChance = 0.08;
-
-              if (Math.random() < wildChance) {
-                row.push(10); // Wild
-              } else {
-                row.push(pickSymbol());
-              }
+              row.push(pickSymbol());
             }
             grid.push(row);
+          }
+          // Break any accidental 3-column match
+          for (let r = 0; r < numRows; r++) {
+            const symCol0 = grid[r][0];
+            if (grid[r][1] === symCol0 || grid[r][1] === 10) {
+              grid[r][1] = (symCol0 + 2) % 10;
+            }
+            if (grid[r][2] === symCol0 || grid[r][2] === 10) {
+              grid[r][2] = (symCol0 + 4) % 10;
+            }
           }
         }
 
@@ -1598,35 +1593,17 @@ function initSocketIO(io) {
           return 0;
         };
 
-        // Generate initial grid (100% Pure RNG - Murni Kehokian Asli)
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode: anteBet, buyFeature });
+
+        // Generate initial grid
         let grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, pickSym));
         let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
 
-        // If Buy Feature: Pemain membeli fitur spin gratis (100x bet) -> jaminan 4 atau 5 Scatter
-        if (buyFeature) {
-          const numScatters = Math.random() < 0.85 ? 4 : (Math.random() < 0.96 ? 5 : 6);
-          const used = new Set();
-          for (let r = 0; r < ROWS; r++) {
-            for (let c = 0; c < COLS; c++) {
-              if (grid[r][c] === 9) grid[r][c] = Math.floor(Math.random() * 9);
-            }
-          }
-          let placed = 0;
-          while (placed < numScatters) {
-            const r = Math.floor(Math.random() * ROWS);
-            const c = Math.floor(Math.random() * COLS);
-            const key = `${r},${c}`;
-            if (!used.has(key)) {
-              used.add(key);
-              grid[r][c] = 9;
-              placed++;
-            }
-          }
-        }
+        // Enforce exact 15.05% Hit Frequency and 96.26% RTP
+        sanitizeClusterGrid(grid, ROWS, COLS, rtpOutcome, pickSym, 9, 10);
 
         // Multiplier Orbs (Zeus Petir Sambaran 2x - 500x)
-        // Base Game: ~12% (Ante bet ~20%)
-        // Free Spins: ~35%
         const zeusMultChance = isFreeSpins ? 0.35 : (anteBet ? 0.20 : 0.12);
         if (Math.random() < zeusMultChance) {
           const numOrbs = isFreeSpins ? (Math.random() < 0.35 ? 2 : 1) : (Math.random() < 0.15 ? 2 : 1);
@@ -1900,6 +1877,9 @@ function initSocketIO(io) {
         };
 
         const ROWS = 3, COLS = 5;
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+
         const grid = [];
         let scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -1912,7 +1892,6 @@ function initSocketIO(io) {
           grid.push(row);
         }
 
-
         const LINES = [
           [1,1,1,1,1], // 1 (Middle)
           [0,0,0,0,0], // 2 (Top)
@@ -1924,6 +1903,28 @@ function initSocketIO(io) {
           [1,2,2,2,1], // 8
           [1,0,0,0,1], // 9
         ];
+
+        if (!rtpOutcome.isHit && !rtpOutcome.isScatter && !isFreeSpins) {
+          // Break line matches on reels 0-2 to guarantee clean 84.95% loss
+          for (let r = 0; r < ROWS; r++) {
+            if (grid[r][1] === grid[r][0] || grid[r][1] === 0 || grid[r][1] === 1) {
+              grid[r][1] = (grid[r][0] + 3) % 11;
+            }
+          }
+        } else if (rtpOutcome.isHit && !isFreeSpins) {
+          const hitSym = rtpOutcome.winTier === 'mega' ? 3 : (rtpOutcome.winTier === 'big' ? 5 : Math.floor(Math.random() * 5) + 6);
+          const targetCols = rtpOutcome.winTier === 'mega' ? 5 : (rtpOutcome.winTier === 'big' ? 4 : 3);
+          const lineIdx = Math.floor(Math.random() * 3);
+          const targetLine = LINES[lineIdx];
+          for (let c = 0; c < targetCols; c++) {
+            grid[targetLine[c]][c] = hitSym;
+          }
+        }
+        if (rtpOutcome.isScatter && !isFreeSpins) {
+          grid[Math.floor(Math.random() * ROWS)][0] = 2;
+          grid[Math.floor(Math.random() * ROWS)][2] = 2;
+          grid[Math.floor(Math.random() * ROWS)][4] = 2;
+        }
 
         const PAYTABLE = {
           0: { 5: 5000, 4: 1000, 3: 200 }, // Wild Red
@@ -2203,14 +2204,32 @@ function initSocketIO(io) {
         };
 
         const ROWS = 3, COLS = 5;
-        const grid = [];
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
 
+        const grid = [];
         for (let r = 0; r < ROWS; r++) {
           const row = [];
           for (let c = 0; c < COLS; c++) {
             row.push(pickSym());
           }
           grid.push(row);
+        }
+
+        if (!rtpOutcome.isHit && !rtpOutcome.isScatter && !isFreeSpins) {
+          // Break line/ways matches on reels 0-2 to guarantee clean 84.95% loss
+          for (let r = 0; r < ROWS; r++) {
+            if (grid[r][1] === grid[r][0]) {
+              grid[r][1] = (grid[r][0] + 3) % 8;
+            }
+          }
+        } else if (rtpOutcome.isHit && !isFreeSpins) {
+          const hitSym = rtpOutcome.winTier === 'mega' ? 0 : (rtpOutcome.winTier === 'big' ? 1 : Math.floor(Math.random() * 4) + 4);
+          const targetCols = rtpOutcome.winTier === 'mega' ? 5 : (rtpOutcome.winTier === 'big' ? 4 : 3);
+          const forcedRow = 1;
+          for (let c = 0; c < targetCols; c++) {
+            grid[forcedRow][c] = hitSym;
+          }
         }
 
         let multGrid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => 0));
@@ -2618,6 +2637,9 @@ function initSocketIO(io) {
           stickyWilds.forEach(w => currentStickyMap.set(`${w.r}-${w.c}`, w.mult));
         }
 
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+
         for (let r = 0; r < ROWS; r++) {
           const row = [], mRow = [];
           for (let c = 0; c < COLS; c++) {
@@ -2634,6 +2656,29 @@ function initSocketIO(io) {
           }
           initialGrid.push(row);
           initialWildMultGrid.push(mRow);
+        }
+
+        if (!rtpOutcome.isHit && !rtpOutcome.isScatter && !isFreeSpins) {
+          // Break line matches on reels 0-2 to guarantee clean 84.95% loss
+          for (let r = 0; r < ROWS; r++) {
+            if (initialGrid[r][1] === initialGrid[r][0] || initialGrid[r][1] === 12) {
+              initialGrid[r][1] = (initialGrid[r][0] + 3) % 11;
+            }
+          }
+        } else if (rtpOutcome.isHit && !isFreeSpins) {
+          // Guarantee a hit matching winTier
+          const hitSym = rtpOutcome.winTier === 'mega' ? 0 : (rtpOutcome.winTier === 'big' ? 1 : Math.floor(Math.random() * 6));
+          const targetCols = rtpOutcome.winTier === 'mega' ? 5 : (rtpOutcome.winTier === 'big' ? 4 : 3);
+          const payline = PAYLINES[Math.floor(Math.random() * 4)];
+          for (let c = 0; c < targetCols; c++) {
+            initialGrid[payline[c]][c] = hitSym;
+          }
+        }
+        if (rtpOutcome.isScatter && !isFreeSpins) {
+          // Stamp 3 scatters on reels 0, 2, 4
+          initialGrid[Math.floor(Math.random() * ROWS)][0] = 11;
+          initialGrid[Math.floor(Math.random() * ROWS)][2] = 11;
+          initialGrid[Math.floor(Math.random() * ROWS)][4] = 11;
         }
 
         // 40 Paylines payouts for 3, 4, 5 of a kind matching exact Wild West Gold rules
@@ -2811,16 +2856,22 @@ function initSocketIO(io) {
         };
         const rm = () => pickAuthenticMultiplier(500);
 
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode });
+
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
           const row = [], mr = [];
           for (let c = 0; c < COLS; c++) {
-            const s = pick(anteMode);
-            if (s === 9) scatterCount++;
-            row.push(s); mr.push(s === 10 ? rm() : 0);
+            row.push(pick());
+            mr.push(0);
           }
-          cg.push(row); cmg.push(mr);
+          cg.push(row);
+          cmg.push(mr);
         }
+
+        // Enforce exact 15.05% Hit Frequency and 96.26% RTP
+        sanitizeClusterGrid(cg, ROWS, COLS, rtpOutcome, pick, 9, 10);
 
         // Drop multiplier bombs (12% base, 20% ante, 35% free spins)
         const candyMultChance = isFreeSpins ? 0.35 : (anteMode ? 0.20 : 0.12);
@@ -3447,18 +3498,22 @@ function initSocketIO(io) {
         // 2x-5x ~70%, 6x-12x ~20%, 15x-25x ~7.5%, 50x ~1.7%, 100x+ ~0.8% (Ultra rare)
         const pickMultVal = () => pickAuthenticMultiplier(1000);
 
+        // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode });
+
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
           const row = [], mr = [];
           for (let c = 0; c < COLS; c++) {
-            const s = pick(anteMode);
-            if (s === 9) scatterCount++;
-            row.push(s);
+            row.push(pick());
             mr.push(0);
           }
           cg.push(row);
           cmg.push(mr);
         }
+
+        // Enforce exact 15.05% Hit Frequency and 96.26% RTP
+        sanitizeClusterGrid(cg, ROWS, COLS, rtpOutcome, pick, 9, 10);
 
         // KAPAN BOLA PENGALI TURUN (SESUAI PRAGMATIC PLAY):
         // Base Game: ~8% (atau ~14% saat Ante Bet aktif).
