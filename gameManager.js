@@ -1273,25 +1273,38 @@ function initSocketIO(io) {
 
       // Cleanup By One active matches on disconnect (surrender / award pot to remaining player)
       for (const [matchId, match] of byoneMatches) {
-        if (match.player1.socketId === socket.id || match.player2.socketId === socket.id) {
-          const isP1 = match.player1.socketId === socket.id;
-          const remaining = isP1 ? match.player2 : match.player1;
+        const allPlayers = match.players || [match.player1, match.player2].filter(Boolean);
+        const leaver = allPlayers.find(p => p && p.socketId === socket.id);
+        if (leaver && !match.finished) {
+          match.finished = true;
+          const remainingList = allPlayers.filter(p => p && p.socketId !== socket.id && p.username !== leaver.username);
+          const remaining = remainingList[0] || (match.player1?.socketId === socket.id ? match.player2 : match.player1);
           const pot = match.pot || 0;
 
-          User.findOne({ username: remaining.username }).then(async (u) => {
-            if (u && pot > 0) {
-              u.coins += pot;
-              await u.save();
-            }
-            io.to(remaining.socketId).emit('byone_match_ended', {
-              winner: remaining.username,
-              pot,
-              byFold: true,
-              byDisconnect: true,
-              isMeWinner: true,
-              newCoins: u ? u.coins : undefined
-            });
-          }).catch(console.error);
+          if (remaining) {
+            User.findOne({ username: remaining.username }).then(async (u) => {
+              if (u && pot > 0) {
+                u.coins += pot;
+                await u.save();
+              }
+              const payload = {
+                winner: remaining.username,
+                leaver: leaver.username,
+                pot,
+                byFold: true,
+                byDisconnect: true,
+                byOpponentLeft: true,
+                isMeWinner: true,
+                newCoins: u ? u.coins : undefined,
+                message: `🏳️ ${leaver.username} keluar dari pertandingan! Anda otomatis MENANG!`
+              };
+              const targetSock = userSockets.get(remaining.username) || remaining.socketId;
+              if (targetSock) io.to(targetSock).emit('byone_match_ended', payload);
+              if (remaining.socketId && remaining.socketId !== targetSock) {
+                io.to(remaining.socketId).emit('byone_match_ended', payload);
+              }
+            }).catch(console.error);
+          }
 
           byoneMatches.delete(matchId);
         }
@@ -2982,7 +2995,7 @@ function initSocketIO(io) {
     socket.on('byone_create_custom_room', async ({ username, mode, betAmount }) => {
       try {
         const rawBet = parseInt(betAmount, 10);
-        const bet = Number.isFinite(rawBet) ? Math.min(200000, Math.max(5000, rawBet)) : 20000;
+        const bet = Number.isFinite(rawBet) ? Math.min(500000, Math.max(5000, rawBet)) : 20000;
         const user = await User.findOne({ username });
         if (user) await checkAndCleanExpiredBonus(user);
         const regularCoins = user ? (user.coins || 0) : 0;
@@ -3392,21 +3405,96 @@ function initSocketIO(io) {
           await winnerUser.save();
         }
 
-        io.to(match.player1.socketId).emit('byone_match_ended', {
-          winner: winnerUsername,
-          pot,
-          isMeWinner: match.player1.username === winnerUsername,
-          newCoins: match.player1.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
-        });
-        io.to(match.player2.socketId).emit('byone_match_ended', {
-          winner: winnerUsername,
-          pot,
-          isMeWinner: match.player2.username === winnerUsername,
-          newCoins: match.player2.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
-        });
+        const p1Sock = userSockets.get(match.player1.username) || match.player1.socketId;
+        const p2Sock = userSockets.get(match.player2.username) || match.player2.socketId;
+
+        if (p1Sock) {
+          io.to(p1Sock).emit('byone_match_ended', {
+            winner: winnerUsername,
+            pot,
+            isMeWinner: match.player1.username === winnerUsername,
+            newCoins: match.player1.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+          });
+        }
+        if (p2Sock) {
+          io.to(p2Sock).emit('byone_match_ended', {
+            winner: winnerUsername,
+            pot,
+            isMeWinner: match.player2.username === winnerUsername,
+            newCoins: match.player2.username === winnerUsername && winnerUser ? winnerUser.coins : undefined
+          });
+        }
         byoneMatches.delete(matchId);
       } catch (err) {
         console.error('byone_match_finish error:', err);
+      }
+    });
+
+    // When a player exits / forfeits an active By One duel (Domino, Billiard, or QiuQiu), opponent auto-wins!
+    socket.on('byone_forfeit', async ({ matchId, roomCode, username }) => {
+      try {
+        const cleanCode = roomCode ? String(roomCode).replace(/[^0-9a-zA-Z]/g, '').trim() : '';
+        const targetMatchId = matchId || (cleanCode ? `byone_${cleanCode}` : '');
+        let match = targetMatchId ? byoneMatches.get(targetMatchId) : null;
+        let foundKey = targetMatchId;
+
+        if (!match) {
+          for (const [mKey, mVal] of byoneMatches) {
+            const plist = mVal.players || [mVal.player1, mVal.player2].filter(Boolean);
+            if (plist.some(p => p && (p.socketId === socket.id || (username && p.username === username)))) {
+              match = mVal;
+              foundKey = mKey;
+              break;
+            }
+          }
+        }
+
+        const leaverName = username || socket.username || 'Lawan';
+
+        if (match && !match.finished) {
+          match.finished = true;
+          const allPlayers = match.players || [match.player1, match.player2].filter(Boolean);
+          const remainingList = allPlayers.filter(p => p && p.username !== leaverName && p.socketId !== socket.id);
+          const winnerObj = remainingList[0] || (match.player1?.username === leaverName ? match.player2 : match.player1);
+          const pot = match.pot || 0;
+
+          if (winnerObj) {
+            const winnerUser = await User.findOne({ username: winnerObj.username });
+            if (winnerUser && pot > 0) {
+              winnerUser.coins += pot;
+              await winnerUser.save();
+            }
+
+            const payload = {
+              winner: winnerObj.username,
+              leaver: leaverName,
+              pot,
+              byFold: true,
+              byOpponentLeft: true,
+              isMeWinner: true,
+              newCoins: winnerUser ? winnerUser.coins : undefined,
+              message: `🏳️ ${leaverName} keluar dari pertandingan! Anda otomatis MENANG!`
+            };
+
+            const winnerSock = userSockets.get(winnerObj.username) || winnerObj.socketId;
+            if (winnerSock) io.to(winnerSock).emit('byone_match_ended', payload);
+            if (winnerObj.socketId && winnerObj.socketId !== winnerSock) {
+              io.to(winnerObj.socketId).emit('byone_match_ended', payload);
+            }
+          }
+
+          byoneMatches.delete(foundKey);
+        }
+
+        // Also notify billiard room if applicable
+        if (cleanCode) {
+          socket.to(`billiard_room_${cleanCode}`).emit('billiard_opponent_left', {
+            leaver: leaverName,
+            message: `🏳️ ${leaverName} keluar dari pertandingan! Anda otomatis MENANG!`
+          });
+        }
+      } catch (err) {
+        console.error('byone_forfeit error:', err);
       }
     });
 
