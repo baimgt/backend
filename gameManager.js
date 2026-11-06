@@ -2984,6 +2984,7 @@ function initSocketIO(io) {
         const rawBet = parseInt(betAmount, 10);
         const bet = Number.isFinite(rawBet) ? Math.min(200000, Math.max(5000, rawBet)) : 20000;
         const user = await User.findOne({ username });
+        if (user) await checkAndCleanExpiredBonus(user);
         const regularCoins = user ? (user.coins || 0) : 0;
         if (!user || regularCoins < bet) {
           const msg = user && user.bonusCoins > 0 && (regularCoins + user.bonusCoins) >= bet
@@ -3033,25 +3034,32 @@ function initSocketIO(io) {
 
     socket.on('byone_join_custom_room', async ({ username, code }) => {
       try {
-        const roomData = byoneRooms.get(code);
+        const cleanCode = String(code || '').replace(/[^0-9a-zA-Z]/g, '').trim();
+        const roomData = byoneRooms.get(cleanCode);
         if (!roomData) {
-          socket.emit('byone_room_error', { message: `Kode Kamar #${code} tidak ditemukan atau sudah ditutup.` });
+          socket.emit('byone_room_error', { message: `Kode Kamar #${cleanCode || code} tidak ditemukan atau sudah ditutup.` });
           return;
         }
 
         const existingIdx = roomData.players.findIndex(p => p.username === username);
         if (existingIdx !== -1) {
           roomData.players[existingIdx].socketId = socket.id;
-          socket.join(`byone_room_${code}`);
-          socket.emit('byone_custom_room_created', { code, room: roomData });
+          socket.join(`byone_room_${cleanCode}`);
+          socket.emit('byone_custom_room_created', { code: cleanCode, room: roomData });
+          io.to(`byone_room_${cleanCode}`).emit('byone_room_updated', {
+            code: cleanCode,
+            room: roomData
+          });
           return;
         }
 
         if (roomData.players.length >= roomData.maxPlayers) {
-          socket.emit('byone_room_error', { message: `Kamar #${code} sudah penuh (${roomData.players.length}/${roomData.maxPlayers}).` });
+          socket.emit('byone_room_error', { message: `Kamar #${cleanCode} sudah penuh (${roomData.players.length}/${roomData.maxPlayers}).` });
           return;
         }
 
+        const joiningUser = await User.findOne({ username });
+        if (joiningUser) await checkAndCleanExpiredBonus(joiningUser);
         const regularCoins = joiningUser ? (joiningUser.coins || 0) : 0;
         if (!joiningUser || regularCoins < roomData.betAmount) {
           const msg = joiningUser && joiningUser.bonusCoins > 0 && (regularCoins + joiningUser.bonusCoins) >= roomData.betAmount
@@ -3073,16 +3081,19 @@ function initSocketIO(io) {
         roomData.players.push(newPlayer);
         roomData.pot = roomData.betAmount * roomData.players.length;
 
-        socket.join(`byone_room_${code}`);
+        socket.join(`byone_room_${cleanCode}`);
+
+        // Transition joining player into the waiting room view immediately
+        socket.emit('byone_custom_room_created', { code: cleanCode, room: roomData });
 
         // Notify all sockets in this room of the newly joined player
-        io.to(`byone_room_${code}`).emit('byone_room_player_joined', {
-          code,
+        io.to(`byone_room_${cleanCode}`).emit('byone_room_player_joined', {
+          code: cleanCode,
           room: roomData,
           newPlayer
         });
-        io.to(`byone_room_${code}`).emit('byone_room_updated', {
-          code,
+        io.to(`byone_room_${cleanCode}`).emit('byone_room_updated', {
+          code: cleanCode,
           room: roomData
         });
       } catch (err) {
@@ -3093,7 +3104,8 @@ function initSocketIO(io) {
 
     socket.on('byone_start_custom_room', async ({ code, username }) => {
       try {
-        const roomData = byoneRooms.get(code);
+        const cleanCode = String(code || '').replace(/[^0-9a-zA-Z]/g, '').trim();
+        const roomData = byoneRooms.get(cleanCode);
         if (!roomData) {
           socket.emit('byone_room_error', { message: 'Kamar tidak ditemukan.' });
           return;
@@ -3124,9 +3136,24 @@ function initSocketIO(io) {
         const pot = roomData.betAmount * roomData.players.length;
         roomData.pot = pot;
 
+        // Register in byoneMatches so byone_move, double bet, and match finish work in Domino ByOneScreen
+        const matchId = `byone_${cleanCode}`;
+        byoneMatches.set(matchId, {
+          matchId,
+          tierId: 'custom',
+          betAmount: roomData.betAmount,
+          pot,
+          mode: roomData.mode || 'domino',
+          player1: roomData.players[0],
+          player2: roomData.players[1],
+          players: roomData.players,
+          currentTurn: roomData.players[0].username,
+          startedAt: Date.now()
+        });
+
         // Broadcast duel start to all players in the room with the actual players list
-        io.to(`byone_room_${code}`).emit('byone_room_duel_start', {
-          code,
+        io.to(`byone_room_${cleanCode}`).emit('byone_room_duel_start', {
+          code: cleanCode,
           mode: roomData.mode,
           betAmount: roomData.betAmount,
           pot,
@@ -3135,7 +3162,7 @@ function initSocketIO(io) {
           player2: roomData.players[1]
         });
 
-        byoneRooms.delete(code);
+        byoneRooms.delete(cleanCode);
       } catch (err) {
         console.error('byone_start_custom_room error:', err);
         socket.emit('byone_room_error', { message: 'Gagal memulai duel.' });
@@ -3143,27 +3170,29 @@ function initSocketIO(io) {
     });
 
     socket.on('byone_leave_custom_room', ({ code, username }) => {
-      const roomData = byoneRooms.get(code);
+      const cleanCode = String(code || '').replace(/[^0-9a-zA-Z]/g, '').trim();
+      const roomData = byoneRooms.get(cleanCode);
       if (!roomData) return;
 
       const pIdx = roomData.players.findIndex(p => p.username === username);
       if (pIdx !== -1) {
         const removed = roomData.players.splice(pIdx, 1)[0];
-        socket.leave(`byone_room_${code}`);
+        socket.leave(`byone_room_${cleanCode}`);
         if (removed.isHost || roomData.players.length === 0) {
-          byoneRooms.delete(code);
-          io.to(`byone_room_${code}`).emit('byone_room_closed', { message: 'Pembuat kamar telah menutup room.' });
+          byoneRooms.delete(cleanCode);
+          io.to(`byone_room_${cleanCode}`).emit('byone_room_closed', { message: 'Pembuat kamar telah menutup room.' });
         } else {
           roomData.pot = roomData.betAmount * roomData.players.length;
-          io.to(`byone_room_${code}`).emit('byone_room_updated', { code, room: roomData });
+          io.to(`byone_room_${cleanCode}`).emit('byone_room_updated', { code: cleanCode, room: roomData });
         }
       }
     });
 
     socket.on('byone_cancel_custom_room', ({ code }) => {
-      if (code) {
-        byoneRooms.delete(code);
-        io.to(`byone_room_${code}`).emit('byone_room_closed', { message: 'Kamar telah dibatalkan.' });
+      const cleanCode = String(code || '').replace(/[^0-9a-zA-Z]/g, '').trim();
+      if (cleanCode) {
+        byoneRooms.delete(cleanCode);
+        io.to(`byone_room_${cleanCode}`).emit('byone_room_closed', { message: 'Kamar telah dibatalkan.' });
       }
     });
 
@@ -3172,9 +3201,9 @@ function initSocketIO(io) {
       if (roomCode) socket.join(`billiard_room_${roomCode}`);
     });
 
-    socket.on('billiard_shot', ({ roomCode, angle, power, spin }) => {
+    socket.on('billiard_shot', ({ roomCode, angle, power, spin, cueX, cueY }) => {
       if (roomCode) {
-        socket.to(`billiard_room_${roomCode}`).emit('billiard_opponent_shot', { angle, power, spin });
+        socket.to(`billiard_room_${roomCode}`).emit('billiard_opponent_shot', { angle, power, spin, cueX, cueY });
       }
     });
 
