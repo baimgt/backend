@@ -91,6 +91,8 @@ exports.getProfile = async (req, res) => {
     profileData.nameChangeCount = nameChangeCount;
     profileData.isFreeNameChange = nameChangeCount === 0;
     profileData.nameChangeCost = nameChangeCount === 0 ? 0 : 50000;
+    profileData.authProvider = user.authProvider || (user.googleEmail || user.googleId || (user.username && user.username.startsWith('Google_')) ? 'google' : 'guest');
+    profileData.googleEmail = user.googleEmail || null;
 
     res.json(profileData);
   } catch (error) {
@@ -710,4 +712,252 @@ exports.changeUsername = async (req, res) => {
     res.status(500).json({ error: error.message || 'Gagal mengubah nama pemain' });
   }
 };
+
+// Link Guest Account to Google Account
+exports.linkGoogleAccount = async (req, res) => {
+  try {
+    const { currentUsername, userId, googleId, googleEmail, googleName, googleAvatar } = req.body;
+
+    const cleanUserId = userId ? String(userId).trim() : '';
+    const cleanCurrent = currentUsername ? String(currentUsername).trim() : '';
+    const cleanEmail = googleEmail ? String(googleEmail).trim().toLowerCase() : '';
+    const cleanGoogleId = googleId ? String(googleId).trim() : '';
+
+    if (!cleanUserId && !cleanCurrent) {
+      return res.status(400).json({ error: 'Identitas akun Tamu tidak ditemukan!' });
+    }
+
+    let user = null;
+    if (cleanUserId) {
+      user = await User.findOne({ userId: cleanUserId });
+    }
+    if (!user && cleanCurrent) {
+      user = await User.findOne({
+        $or: [
+          { username: cleanCurrent },
+          { userId: cleanCurrent },
+          { username: new RegExp('^' + cleanCurrent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
+        ]
+      });
+    }
+
+    if (!user) {
+      return res.status(404).json({ error: 'Akun Tamu tidak ditemukan di server!' });
+    }
+
+    // Jika akun ini sudah dikaitkan sebelumnya
+    if (user.authProvider === 'google' && (user.googleEmail || user.googleId)) {
+      return res.status(400).json({
+        error: `Akun ini sudah dikaitkan dengan akun Google${user.googleEmail ? ` (${user.googleEmail})` : ''}!`
+      });
+    }
+
+    // Cek apakah akun Google tersebut sudah terhubung ke akun lain
+    const conflictConditions = [];
+    if (cleanGoogleId) conflictConditions.push({ googleId: cleanGoogleId });
+    if (cleanEmail) conflictConditions.push({ googleEmail: cleanEmail });
+
+    // Buat kandidat nama Google jika diberikan
+    const rawName = String(googleName || '').replace(/^Google_/i, '').replace(/[^a-zA-Z0-9_]/g, '');
+    const candidateGoogleUsername = rawName ? `Google_${rawName}`.slice(0, 16) : '';
+    if (!cleanGoogleId && !cleanEmail && candidateGoogleUsername) {
+      conflictConditions.push({
+        username: new RegExp('^' + candidateGoogleUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i')
+      });
+    }
+
+    if (conflictConditions.length > 0) {
+      const conflictUser = await User.findOne({
+        _id: { $ne: user._id },
+        $or: conflictConditions
+      });
+      if (conflictUser) {
+        return res.status(400).json({
+          error: `Akun Google tersebut sudah terhubung ke akun lain (${conflictUser.username} • ID: #${conflictUser.userId || '-'}). Silakan pilih akun Google yang lain.`
+        });
+      }
+    }
+
+    const oldUsername = user.username;
+    let finalUsername = user.username;
+
+    // Jika username saat ini masih berformat Guest_xxxx dan ada nama Google, perbarui otomatis ke nama Google
+    if (/^Guest_/i.test(user.username) && candidateGoogleUsername.length >= 3) {
+      let targetName = candidateGoogleUsername;
+      const existingSameName = await User.findOne({
+        _id: { $ne: user._id },
+        username: new RegExp('^' + targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i')
+      });
+      if (existingSameName) {
+        const suffix = Math.floor(100 + Math.random() * 900);
+        targetName = `${candidateGoogleUsername.slice(0, 12)}_${suffix}`;
+      }
+      finalUsername = targetName;
+      user.username = finalUsername;
+    }
+
+    user.authProvider = 'google';
+    if (cleanEmail) user.googleEmail = cleanEmail;
+    if (cleanGoogleId) user.googleId = cleanGoogleId;
+
+    // Jika avatar masih bawaan (🐸 atau /bg.png) dan ada foto profil Google, gunakan foto Google
+    if (googleAvatar && (!user.avatar || user.avatar === '🐸' || user.avatar === '/bg.png')) {
+      user.avatar = googleAvatar;
+    }
+
+    if (!user.userId) {
+      user.userId = await generateUniqueUserId();
+    }
+
+    await user.save();
+
+    // Jika username berubah dari Guest_xxxx ke Google_xxxx, sinkronkan relasi pertemanan & inbox
+    if (oldUsername !== finalUsername) {
+      try {
+        await User.updateMany({ friends: oldUsername }, { $set: { "friends.$": finalUsername } });
+        await User.updateMany({ friendRequests: oldUsername }, { $set: { "friendRequests.$": finalUsername } });
+        await InboxMessage.updateMany({ toUsername: oldUsername }, { toUsername: finalUsername });
+        await InboxMessage.updateMany({ fromUsername: oldUsername }, { fromUsername: finalUsername });
+        await TransferHistory.updateMany({ toUsername: oldUsername }, { toUsername: finalUsername });
+        await TransferHistory.updateMany({ fromUsername: oldUsername }, { fromUsername: finalUsername });
+      } catch (relErr) {
+        console.warn('Peringatan sinkronisasi relasi saat link Google:', relErr.message);
+      }
+    }
+
+    // Kirim notifikasi Inbox bahwa akun telah aman dikaitkan
+    try {
+      await InboxMessage.create({
+        toUsername: finalUsername,
+        fromUsername: 'SISTEM',
+        type: 'system',
+        title: '🔗 Akun Berhasil Dikaitkan ke Google!',
+        body: `Selamat! Akun Anda (ID: #${user.userId}) kini telah resmi dikaitkan dengan akun Google${cleanEmail ? ` (${cleanEmail})` : ''}. Koin (${(user.coins || 0).toLocaleString('id-ID')}), daftar teman, dan seluruh progres permainan Anda kini tersimpan permanen!`,
+        icon: '🛡️',
+        isRead: false
+      });
+    } catch (_) {}
+
+    console.log(`[GOOGLE ACCOUNT LINKED] ${oldUsername} -> ${finalUsername} | ID: ${user.userId} | Email: ${cleanEmail || '-'}`);
+
+    res.json({
+      message: `Selamat! Akun Anda berhasil dikaitkan dengan Google${cleanEmail ? ` (${cleanEmail})` : ''}!`,
+      username: finalUsername,
+      oldUsername,
+      userId: user.userId,
+      coins: user.coins,
+      avatar: user.avatar,
+      authProvider: 'google',
+      googleEmail: user.googleEmail || cleanEmail || null
+    });
+  } catch (error) {
+    console.error('Link Google account error:', error);
+    res.status(500).json({ error: error.message || 'Gagal mengaitkan akun Google' });
+  }
+};
+
+// Google Login / Register (Supports accounts previously linked from Guest)
+exports.googleLogin = async (req, res) => {
+  try {
+    const { googleId, googleEmail, googleName, googleAvatar } = req.body;
+    const cleanEmail = googleEmail ? String(googleEmail).trim().toLowerCase() : '';
+    const cleanGoogleId = googleId ? String(googleId).trim() : '';
+    const rawName = String(googleName || '').replace(/^Google_/i, '').replace(/[^a-zA-Z0-9_]/g, '');
+    const sanitizedUsername = (rawName ? `Google_${rawName}` : `Google_${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 16);
+
+    let user = null;
+
+    // 1. Cari berdasarkan googleId atau googleEmail terlebih dahulu (menangkap akun Tamu yang sudah dikaitkan sekalipun namanya sudah diganti)
+    if (cleanGoogleId) {
+      user = await User.findOne({ googleId: cleanGoogleId });
+    }
+    if (!user && cleanEmail) {
+      user = await User.findOne({ googleEmail: cleanEmail });
+    }
+    // 2. Fallback cari berdasarkan username Google
+    if (!user && sanitizedUsername) {
+      user = await User.findOne({
+        username: new RegExp('^' + sanitizedUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i')
+      });
+    }
+
+    if (user) {
+      let modified = false;
+      if (user.authProvider !== 'google') {
+        user.authProvider = 'google';
+        modified = true;
+      }
+      if (cleanGoogleId && !user.googleId) {
+        user.googleId = cleanGoogleId;
+        modified = true;
+      }
+      if (cleanEmail && !user.googleEmail) {
+        user.googleEmail = cleanEmail;
+        modified = true;
+      }
+      if (!user.userId) {
+        user.userId = await generateUniqueUserId();
+        modified = true;
+      }
+      if (googleAvatar && (!user.avatar || user.avatar === '/bg.png')) {
+        user.avatar = googleAvatar;
+        modified = true;
+      }
+      if (modified) await user.save();
+
+      return res.json({
+        message: 'Berhasil masuk dengan Google!',
+        isNew: false,
+        username: user.username,
+        userId: user.userId,
+        coins: user.coins,
+        avatar: user.avatar || '🐸',
+        customFrame: user.customFrame || 'crown',
+        authProvider: 'google',
+        googleEmail: user.googleEmail || cleanEmail || null
+      });
+    }
+
+    // 3. Jika belum terdaftar, buat akun Google baru
+    let targetUsername = sanitizedUsername;
+    const existingName = await User.findOne({
+      username: new RegExp('^' + targetUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i')
+    });
+    if (existingName) {
+      targetUsername = `${sanitizedUsername.slice(0, 12)}_${Math.floor(100 + Math.random() * 900)}`;
+    }
+
+    const newUserId = await generateUniqueUserId();
+    const initialAvatar = googleAvatar || '🐸';
+    const newUser = new User({
+      username: targetUsername,
+      userId: newUserId,
+      coins: 100000,
+      rp: 0,
+      score: 50,
+      avatar: initialAvatar,
+      authProvider: 'google',
+      googleId: cleanGoogleId || null,
+      googleEmail: cleanEmail || null,
+      nameChangeCount: 0
+    });
+    await newUser.save();
+
+    res.status(201).json({
+      message: 'Akun Google berhasil didaftarkan!',
+      isNew: true,
+      username: newUser.username,
+      userId: newUser.userId,
+      coins: newUser.coins,
+      avatar: newUser.avatar,
+      customFrame: newUser.customFrame || 'crown',
+      authProvider: 'google',
+      googleEmail: newUser.googleEmail
+    });
+  } catch (error) {
+    console.error('Google login error:', error);
+    res.status(500).json({ error: error.message || 'Gagal masuk dengan Google' });
+  }
+};
+
 

@@ -76,6 +76,21 @@ const userSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  googleId: {
+    type: String,
+    default: null,
+    index: true
+  },
+  googleEmail: {
+    type: String,
+    default: null,
+    index: true
+  },
+  authProvider: {
+    type: String,
+    enum: ['guest', 'google'],
+    default: 'guest'
+  },
   role: {
     type: String,
     enum: ['user', 'admin'],
