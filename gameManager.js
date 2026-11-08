@@ -13,9 +13,27 @@ const activeGames = new Map();
 
 // Bot name pool
 const BOT_NAMES = [
-  'MasterGrog 🐸', 'SlowNinja 🐢', 'GexFly 🦎', 'DragonBoss 🐉',
-  'FrogKing 🐸', 'TurtleX 🐢', 'LizardPro 🦎', 'SnakeEye 🐍',
-  'CrocHunter 🐊', 'GeckoStar 🦎', 'ToadMaster 🐸', 'IguanaPro 🦎'
+  'RajaGaple', 'BosDomino', 'Sultan99', 'DewaBalak', 'PutriHoki', 'MasterQiu',
+  'KaptenBalak', 'JawaraGaple', 'SultanBanten', 'SultanAndara', 'BosMuda_JKT',
+  'KuncianMaut', 'GapleMaster_Sby', 'BantingMeja', 'SniperBalak', 'TutupJalan',
+  'SapuBersih99', 'PakarGaple', 'Cak_Kumis', 'Om_Brewok', 'Kang_Asep',
+  'Bung_Fajar', 'Bang_Bule', 'Mas_Agung', 'Teh_Lilis', 'Koh_Aming',
+  'Daeng_Umar', 'Bli_Wayan', 'Opung_Batak', 'Pak_Haji_Gaul', 'Neng_Geulis',
+  'Mpok_Siti', 'Bro_Rian', 'Aldo_Palembang', 'Fikri_Makassar', 'Dimas_Semarang',
+  'Bagas_Jogja', 'Gilang_Bandung', 'Rendy_Malang', 'HokiSelalu', 'SiPalingHoki',
+  'AutoWin_88', 'BintangMalam', 'PangeranGaple', 'LaskarGaple', 'KudaHitam_99',
+  'ElangMalam', 'GarudaSakty', 'BocahPetualang', 'PendekarKartu', 'BegalChip',
+  'PemburuJackpot', 'AntiKalah', 'HokiSejati', 'RajaBluffing', 'PembalapMeja',
+  'PantangFold', 'TaktikBunglon', 'KartuJoker', 'DewaKoplok', 'CemeMaster',
+  'BandarKecil', 'JokerHitam', 'DoubleEnam', 'BalakKosong', 'SiKocokGaple',
+  'AuraSultan', 'PetirBalak', 'KartuMaut', 'DewaJudi_88', 'GatotGaple',
+  'BimaSakti99', 'PendekarBalak', 'KeraSakti_QQ', 'NagaEmas_88', 'SingaMeja',
+  'MacanKembar', 'Rajawali_ID', 'HiuPutih_QQ', 'BantengMerah', 'SerigalaMalam',
+  'PendekarSakti', 'KsatriaGaple', 'PangeranBalak', 'RatuDomino', 'NonaManis_99',
+  'BintangKejora', 'SuryaKencana', 'MegaBintang', 'CahayaHoki', 'BerkahMelimpah',
+  'RezekiNomplok', 'UntungTerus', 'MajuJaya_QQ', 'Sentosa_Gaple', 'WiraBalak',
+  'SatriaMalam', 'GunturGaple', 'KilatDomino', 'Tegar99', 'FajarHoki',
+  'BintangGaple', 'DewaKartu_ID', 'RajaBanting', 'KuncianSakti', 'SultanMeja'
 ];
 
 // Generate all 28 domino tiles

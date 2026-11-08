@@ -208,15 +208,27 @@ exports.createUser = async (req, res) => {
 exports.getUsersList = async (req, res) => {
   try {
     const { exclude, q, id } = req.query;
-    const searchTerm = (id || q || '').trim();
+    const rawSearch = (id || q || '').trim();
+    const cleanSearch = rawSearch.replace(/^#/, '').trim();
 
     let filter = { username: { $ne: exclude } };
-    if (searchTerm) {
-      filter.$or = [
-        { userId: searchTerm },
-        { userId: { $regex: searchTerm, $options: 'i' } },
-        { username: { $regex: searchTerm, $options: 'i' } }
+    if (rawSearch) {
+      const orList = [
+        { userId: cleanSearch },
+        { userId: rawTargetSearchSafe(cleanSearch) },
+        { userId: rawSearch }
       ];
+      const numSearch = Number(cleanSearch);
+      if (!isNaN(numSearch) && cleanSearch.length > 0) {
+        orList.push({ userId: numSearch });
+      }
+      try {
+        const escClean = cleanSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escRaw = rawSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        orList.push({ userId: { $regex: escClean, $options: 'i' } });
+        orList.push({ username: { $regex: escRaw, $options: 'i' } });
+      } catch (_) {}
+      filter.$or = orList;
     }
 
     const users = await User.find(filter, 'username userId avatar coins vipLevel customFrame friends friendRequests');
@@ -234,51 +246,69 @@ exports.getUsersList = async (req, res) => {
   }
 };
 
+function rawTargetSearchSafe(val) {
+  return String(val || '').trim();
+}
+
 // Send Friend Request (Supports searching/adding by 8-digit userId or username)
 exports.sendFriendRequest = async (req, res) => {
   try {
     const { username, friendUsername, friendId } = req.body;
-    const target = String(friendId || friendUsername || '').trim();
+    const rawTarget = String(friendId || friendUsername || '').trim();
+    if (!rawTarget) {
+      return res.status(400).json({ error: 'ID atau Username pemain diperlukan' });
+    }
+
+    const cleanId = rawTarget.replace(/^#/, '').trim();
     const sender = await User.findOne({ username });
 
     if (!sender) {
       return res.status(404).json({ error: 'Akun pengirim tidak ditemukan' });
     }
 
-    // Prioritize search by userId first, then fallback to username
-    let receiver = null;
-    if (friendId) {
-      receiver = await User.findOne({ userId: String(friendId).trim() });
+    // Prioritize search by userId (clean numeric/string, with or without #) then username (case-insensitive)
+    const orConditions = [
+      { userId: cleanId },
+      { userId: rawTarget },
+      { username: rawTarget }
+    ];
+    const numId = Number(cleanId);
+    if (!isNaN(numId) && cleanId.length > 0) {
+      orConditions.push({ userId: numId });
     }
-    if (!receiver && target) {
-      receiver = await User.findOne({
-        $or: [{ userId: target }, { username: target }]
-      });
-    }
+    try {
+      const escapedRaw = rawTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedClean = cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      orConditions.push({ username: new RegExp(`^${escapedRaw}$`, 'i') });
+      orConditions.push({ username: new RegExp(`^${escapedClean}$`, 'i') });
+    } catch (_) {}
+
+    const receiver = await User.findOne({ $or: orConditions });
 
     if (!receiver) {
-      return res.status(404).json({ error: `Pemain dengan ID "${target}" tidak ditemukan` });
+      return res.status(404).json({ error: `Pemain dengan ID atau Username "${rawTarget}" tidak ditemukan` });
     }
 
     const actualReceiverUsername = receiver.username;
-    if (sender.username === actualReceiverUsername) {
+    if (sender.username.toLowerCase() === actualReceiverUsername.toLowerCase()) {
       return res.status(400).json({ error: 'Tidak bisa menambahkan diri sendiri' });
     }
 
-    if (sender.friends.includes(actualReceiverUsername)) {
-      return res.status(400).json({ error: `Sudah berteman dengan ${actualReceiverUsername} (ID: ${receiver.userId || '-'})` });
+    if (sender.friends && sender.friends.some(f => f.toLowerCase() === actualReceiverUsername.toLowerCase())) {
+      return res.status(400).json({ error: `Sudah berteman dengan ${actualReceiverUsername} (ID: #${receiver.userId || '-'})` });
     }
 
-    if (receiver.friendRequests.includes(username)) {
+    if (receiver.friendRequests && receiver.friendRequests.some(r => r.toLowerCase() === username.toLowerCase())) {
       return res.status(400).json({ error: 'Permintaan pertemanan sudah dikirim sebelumnya' });
     }
 
     // Add to receiver's friendRequests
-    receiver.friendRequests.push(username);
+    if (!receiver.friendRequests) receiver.friendRequests = [];
+    receiver.friendRequests.push(sender.username);
     await receiver.save();
 
     res.json({
-      message: `Permintaan pertemanan terkirim ke ${actualReceiverUsername} (ID: ${receiver.userId})!`,
+      message: `Permintaan pertemanan terkirim ke ${actualReceiverUsername} (ID: #${receiver.userId})!`,
       friendUsername: actualReceiverUsername,
       friendId: receiver.userId
     });
