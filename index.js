@@ -79,6 +79,7 @@ app.get('/api/profile/:username', userController.getProfile);
 app.get('/api/leaderboard', userController.getLeaderboard);
 app.post('/api/users', userController.createUser);
 app.get('/api/users', userController.getUsersList);
+app.get('/api/users/lookup', userController.lookupUser);
 app.post('/api/friends/add', userController.sendFriendRequest);
 app.post('/api/friends/accept', userController.acceptFriendRequest);
 app.post('/api/friends/decline', userController.declineFriendRequest);

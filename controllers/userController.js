@@ -392,6 +392,53 @@ exports.removeFriend = async (req, res) => {
   }
 };
 
+// Lookup single user by exact userId or username (for Transfer Preview Card)
+exports.lookupUser = async (req, res) => {
+  try {
+    const rawQuery = String(req.query.q || req.query.id || req.query.username || '').trim();
+    if (!rawQuery) {
+      return res.status(400).json({ error: 'Parameter q atau id diperlukan' });
+    }
+    const cleanId = rawQuery.replace(/^#/, '').trim();
+    const numId = Number(cleanId);
+
+    const orConditions = [
+      { userId: cleanId },
+      { userId: rawQuery },
+      { username: rawQuery }
+    ];
+    if (!isNaN(numId) && cleanId.length > 0) {
+      orConditions.push({ userId: numId });
+    }
+    try {
+      const escRaw = rawQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escClean = cleanId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      orConditions.push({ username: new RegExp(`^${escRaw}$`, 'i') });
+      orConditions.push({ username: new RegExp(`^${escClean}$`, 'i') });
+    } catch (_) {}
+
+    const user = await User.findOne({ $or: orConditions }, 'username userId avatar coins vipLevel customFrame').lean();
+    if (!user) {
+      return res.status(404).json({ error: 'Akun pemain tidak ditemukan' });
+    }
+    const payload = {
+      username: user.username,
+      userId: user.userId || '',
+      avatar: user.avatar || '🐸',
+      coins: user.coins || 0,
+      vipLevel: user.vipLevel || 0,
+      customFrame: user.customFrame || 'crown'
+    };
+    res.json({
+      found: true,
+      user: payload,
+      ...payload
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // Transfer Coins / Send Money
 exports.transferCoins = async (req, res) => {
   try {
@@ -402,20 +449,32 @@ exports.transferCoins = async (req, res) => {
       return res.status(400).json({ error: 'Jumlah koin tidak valid' });
     }
 
-    if (fromUsername === toUsername) {
-      return res.status(400).json({ error: 'Tidak bisa mengirim koin ke diri sendiri' });
+    const rawTo = String(toUsername || '').trim();
+    const cleanTo = rawTo.replace(/^#/, '').trim();
+    const numTo = Number(cleanTo);
+
+    const orConditions = [
+      { username: rawTo },
+      { username: cleanTo },
+      { userId: cleanTo },
+      { userId: rawTo }
+    ];
+    if (!isNaN(numTo) && cleanTo.length > 0) {
+      orConditions.push({ userId: numTo });
     }
+    try {
+      orConditions.push({ username: new RegExp(`^${rawTo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+      orConditions.push({ username: new RegExp(`^${cleanTo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+    } catch (_) {}
 
     const sender = await User.findOne({ username: fromUsername });
-    const receiver = await User.findOne({
-      $or: [{ username: toUsername }, { userId: toUsername }]
-    });
+    const receiver = await User.findOne({ $or: orConditions });
 
     if (!sender) return res.status(404).json({ error: 'Pengirim tidak ditemukan' });
     if (!receiver) return res.status(404).json({ error: 'Penerima tidak ditemukan' });
 
     const actualToUsername = receiver.username;
-    if (fromUsername === actualToUsername) {
+    if (sender.username.toLowerCase() === actualToUsername.toLowerCase()) {
       return res.status(400).json({ error: 'Tidak bisa mengirim koin ke diri sendiri' });
     }
 
