@@ -8,6 +8,8 @@ services:
     restart: always
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       PORT: 8080
       MONGO_URI: "mongodb+srv://gamerstore:P1CwEUjy84OiTfAM@gamerstore.yy5ekdc.mongodb.net/domino_db?retryWrites=true&w=majority"

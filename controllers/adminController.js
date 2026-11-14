@@ -133,7 +133,8 @@ exports.login = async (req, res) => {
     }
 
     const { password } = req.body;
-    const adminPassword = (process.env.ADMIN_PASSWORD || '88889999').trim();
+    let adminPassword = (process.env.ADMIN_PASSWORD || '88889999').trim();
+    adminPassword = adminPassword.replace(/^["']|["']$/g, '').trim();
 
     if (!password || String(password).trim() !== adminPassword) {
       const state = loginAttempts.get(ip) || { attempts: 0 };

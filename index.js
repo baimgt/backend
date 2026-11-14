@@ -34,6 +34,7 @@ const adminController = require('./controllers/adminController');
 const { initSocketIO } = require('./gameManager');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://gamerstore:P1CwEUjy84OiTfAM@gamerstore.yy5ekdc.mongodb.net/domino_db?retryWrites=true&w=majority';
 
