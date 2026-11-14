@@ -1,9 +1,29 @@
-const express = require('express');
+﻿const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+
+// Auto-load .env file without external dependencies
+try {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    const envLines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of envLines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const idx = trimmed.indexOf('=');
+      if (idx !== -1) {
+        const key = trimmed.substring(0, idx).trim();
+        const val = trimmed.substring(idx + 1).trim();
+        if (key && !process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  }
+} catch (e) {}
 const { Server } = require('socket.io');
 const userController = require('./controllers/userController');
 const inboxController = require('./controllers/inboxController');
@@ -116,9 +136,15 @@ app.post('/api/shop/verify-playstore-purchase',    shopController.verifyPlayStor
 
 // Admin & Dashboard routes
 app.get('/admin',                                  adminController.renderDashboard);
-app.get('/api/admin/users',                        adminController.getUsers);
-app.post('/api/admin/set-role',                    adminController.setRole);
-app.post('/api/admin/adjust-coins',                adminController.adjustCoins);
+app.post('/api/admin/login',                       adminController.login);
+app.get('/api/admin/auth-status',                  adminController.getAuthStatus);
+app.post('/api/admin/logout',                      adminController.logout);
+
+app.get('/api/admin/users',                        adminController.requireAdminAuth, adminController.getUsers);
+app.post('/api/admin/set-role',                    adminController.requireAdminAuth, adminController.setRole);
+app.post('/api/admin/adjust-coins',                adminController.requireAdminAuth, adminController.adjustCoins);
+app.post('/api/admin/toggle-slot-lock',            adminController.requireAdminAuth, adminController.toggleSlotLock);
+app.get('/api/admin/coin-logs',                    adminController.requireAdminAuth, adminController.getCoinLogs);
 
 // Initialize Socket.IO game events
 initSocketIO(io);

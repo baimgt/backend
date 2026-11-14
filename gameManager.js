@@ -4,6 +4,7 @@
 const User = require('./models/User');
 const { spendUserCoins, spendSlotCoins, checkAndCleanExpiredBonus } = require('./helpers/bonusHelper');
 const { TARGET_RTP, TARGET_HIT_FREQ, determineSpinOutcome, sanitizeClusterGrid } = require('./slotRtpEngine');
+const { recordCoinLog } = require('./helpers/coinLogger');
 
 // Active waiting rooms: Map<roomKey, WaitingRoom>
 const waitingRooms = new Map();
@@ -925,8 +926,39 @@ class GameState {
         try {
           const user = await User.findOne({ username: p.username });
           if (user) {
+            const balBefore = user.coins;
             user.coins = user.coins + p.tableStack;
             await user.save();
+
+            const netGain = p.tableStack - buyIn;
+            if (netGain > 0) {
+              recordCoinLog({
+                username: user.username,
+                userId: user.userId,
+                source: 'domino',
+                gameName: 'Domino Gaple',
+                type: 'gain',
+                amount: netGain,
+                balanceBefore: balBefore,
+                balanceAfter: user.coins,
+                description: `Menang permainan Domino (+${netGain.toLocaleString('id-ID')} koin bersih)`,
+                meta: { buyIn, finalStack: p.tableStack }
+              });
+            } else if (netGain < 0) {
+              const loss = Math.abs(netGain);
+              recordCoinLog({
+                username: user.username,
+                userId: user.userId,
+                source: 'domino',
+                gameName: 'Domino Gaple',
+                type: 'spend',
+                amount: loss,
+                balanceBefore: balBefore,
+                balanceAfter: user.coins,
+                description: `Kalah permainan Domino (-${loss.toLocaleString('id-ID')} koin | Buy-in ${buyIn.toLocaleString('id-ID')})`,
+                meta: { buyIn, finalStack: p.tableStack }
+              });
+            }
           }
         } catch (err) {
           console.error('Error updating final coins for', p.username, err);
@@ -1416,8 +1448,11 @@ function initSocketIO(io) {
         // Deduct bet (consume daily bonusCoins first if playing slot)
         spendSlotCoins(user, bet);
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins: false, anteMode: false });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins: false, anteMode: false, alwaysLose: isForcedLoss });
 
         // 3. Generate Slot Grid (3 rows x 5 columns)
         // 0: 9, 1: 10, 2: J, 3: Q, 4: K, 5: A
@@ -1544,8 +1579,56 @@ function initSocketIO(io) {
         else if (totalWinMult >= 80) winType = 'big_win';
         else if (totalWinMult >= 30) winType = 'win';
 
+        if (isForcedLoss) {
+          winAmount = 0;
+          totalWinMult = 0;
+          winningSymbols = [];
+          winType = 'normal';
+        }
+
+        const balBeforeSlot = user.coins;
         user.coins += winAmount;
         await user.save();
+
+        if (winAmount === 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_duofu',
+            gameName: 'DuoFuDuoCai Slot',
+            type: 'spend',
+            amount: bet,
+            balanceBefore: balBeforeSlot + bet,
+            balanceAfter: user.coins,
+            description: `Kalah spin DuoFuDuoCai (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, totalWinMult: 0, winType: 'lose' }
+          });
+        } else {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_duofu',
+            gameName: 'DuoFuDuoCai Slot',
+            type: 'spend',
+            amount: bet,
+            balanceBefore: balBeforeSlot + bet,
+            balanceAfter: balBeforeSlot,
+            description: `Taruhan spin DuoFuDuoCai (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet }
+          });
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_duofu',
+            gameName: 'DuoFuDuoCai Slot',
+            type: 'gain',
+            amount: winAmount,
+            balanceBefore: balBeforeSlot,
+            balanceAfter: user.coins,
+            description: `Menang spin slot DuoFuDuoCai (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, totalWinMult, winType }
+          });
+        }
 
         // 7. Send result
         socket.emit('spin_result', {
@@ -1656,8 +1739,11 @@ function initSocketIO(io) {
           return 0;
         };
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode: anteBet, buyFeature });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode: anteBet, buyFeature, alwaysLose: isForcedLoss });
 
         // Generate initial grid
         let grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, pickSym));
@@ -1667,7 +1753,7 @@ function initSocketIO(io) {
         sanitizeClusterGrid(grid, ROWS, COLS, rtpOutcome, pickSym, 9, 10);
 
         // Multiplier Orbs (Zeus Petir Sambaran - Peluang diturunkan agar sulit menang besar)
-        const zeusMultChance = buyFeature ? 0 : (isFreeSpins ? 0.12 : (anteBet ? 0.08 : 0.05));
+        const zeusMultChance = (buyFeature || isForcedLoss) ? 0 : (isFreeSpins ? 0.12 : (anteBet ? 0.08 : 0.05));
         if (Math.random() < zeusMultChance) {
           const r = Math.floor(Math.random() * ROWS);
           const c = Math.floor(Math.random() * COLS);
@@ -1842,22 +1928,75 @@ function initSocketIO(io) {
           totalWin += Math.floor(bet * spm);
         }
 
+        if (isForcedLoss) {
+          totalWin = 0;
+          baseTumbleWin = 0;
+          finalMultiplier = 1;
+          _ms.freeMult = 0;
+        }
+
         // Free Spins Trigger / Retrigger:
         // Base Game: 4+ Scatters awards 15 Free Spins
         // Free Spins: 3+ Scatters awards +5 Free Spins (Retrigger!)
-        const triggerFreeSpins = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
-        const freeSpinsAwarded = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0);
+        const triggerFreeSpins = isForcedLoss ? false : (isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4));
+        const freeSpinsAwarded = isForcedLoss ? 0 : (isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0));
 
         // Max Win Cap for Gates of Olympus (5,000x bet)
         const maxWinCap = bet * 5000;
         if (totalWin > maxWinCap) totalWin = maxWinCap;
 
         // Persist User Balance
+        const balBeforeZeus = user ? user.coins : 0;
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const newBalance = isGuestMode
           ? guestBalance + Math.floor(totalWin)
           : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWin === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_zeus',
+              gameName: 'Gates of Olympus',
+              type: 'spend',
+              amount: betDeduction,
+              balanceBefore: balBeforeZeus + betDeduction,
+              balanceAfter: user.coins,
+              description: `Kalah spin Gates of Olympus (Bet 🪙 ${betDeduction.toLocaleString('id-ID')})`,
+              meta: { bet: betDeduction, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_zeus',
+              gameName: 'Gates of Olympus',
+              type: 'spend',
+              amount: betDeduction,
+              balanceBefore: balBeforeZeus + betDeduction,
+              balanceAfter: balBeforeZeus,
+              description: `Taruhan spin Gates of Olympus (Bet 🪙 ${betDeduction.toLocaleString('id-ID')})`,
+              meta: { bet: betDeduction, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWin > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_zeus',
+            gameName: 'Gates of Olympus',
+            type: 'gain',
+            amount: Math.floor(totalWin),
+            balanceBefore: balBeforeZeus,
+            balanceAfter: user.coins,
+            description: `Menang Gates of Olympus ${finalMultiplier > 1 ? `Pengali ${finalMultiplier}x` : ''} (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, finalMultiplier, isFreeSpins, scatterCount }
+          });
+        }
 
         // Win Type Classification (Big Win >= 5x, Mega Win >= 12x, Super Win >= 30x)
         const winRatio = totalWin / bet;
@@ -1951,8 +2090,11 @@ function initSocketIO(io) {
         };
 
         const ROWS = 3, COLS = 5;
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, alwaysLose: isForcedLoss });
 
         const grid = [];
         let scatterCount = 0;
@@ -2112,19 +2254,75 @@ function initSocketIO(io) {
         }
 
         let freeSpinsAwarded = 0;
-        if (scatterCount === 5) freeSpinsAwarded = 50;
-        else if (scatterCount === 4) freeSpinsAwarded = 20;
-        else if (scatterCount === 3) freeSpinsAwarded = 10;
+        if (!isForcedLoss) {
+          if (scatterCount === 5) freeSpinsAwarded = 50;
+          else if (scatterCount === 4) freeSpinsAwarded = 20;
+          else if (scatterCount === 3) freeSpinsAwarded = 10;
+        }
 
         const _lm = applyLineMultiplier(socket, 'fafafa', isFreeSpins, totalWinAmount);
         if (_lm.mult > 1) {
           totalWinAmount = totalWinAmount * _lm.mult;
           winningLines.forEach(w => { w.win = w.win * _lm.mult; });
         }
+
+        if (isForcedLoss) {
+          totalWinAmount = 0;
+          freeSpinsAwarded = 0;
+          winningLines = [];
+          isFullBoard = false;
+        }
+
+        const balBeforeFafafa = user ? user.coins : 0;
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
         
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWinAmount === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_fafafa',
+              gameName: 'Fafafa 2 Slot',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeFafafa + bet,
+              balanceAfter: user.coins,
+              description: `Kalah spin Fafafa 2 (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_fafafa',
+              gameName: 'Fafafa 2 Slot',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeFafafa + bet,
+              balanceAfter: balBeforeFafafa,
+              description: `Taruhan spin Fafafa 2 (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWinAmount > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_fafafa',
+            gameName: 'Fafafa 2 Slot',
+            type: 'gain',
+            amount: Math.floor(totalWinAmount),
+            balanceBefore: balBeforeFafafa,
+            balanceAfter: user.coins,
+            description: `Menang Fafafa 2 Slot (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, isFreeSpins }
+          });
+        }
 
         socket.emit('fafafa_result', {
           multiplier: _lm.info,
@@ -2180,8 +2378,11 @@ function initSocketIO(io) {
           }
         }
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // Low RTP & Hit Frequency Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode: isAnte });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode: isAnte, alwaysLose: isForcedLoss });
 
         // Generate 6x3 grid
         const grid = [];
@@ -2227,10 +2428,63 @@ function initSocketIO(io) {
           totalWinAmount = Math.floor(totalWinAmount * wildMultiplier);
         }
 
+        if (isForcedLoss) {
+          totalWinAmount = 0;
+          hasWildInWin = false;
+          wildMultiplier = 1;
+          scatterCount = 0;
+        }
+
+        const balBefore5L = user ? user.coins : 0;
         if (user) user.coins += totalWinAmount;
         if (!isGuestMode && user) await user.save();
 
         const newBalance = isGuestMode ? guestBalance + totalWinAmount : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWinAmount === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_fivelions',
+              gameName: '5 Lions Megaways',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBefore5L + bet,
+              balanceAfter: user.coins,
+              description: `Kalah spin 5 Lions Megaways (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_fivelions',
+              gameName: '5 Lions Megaways',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBefore5L + bet,
+              balanceAfter: balBefore5L,
+              description: `Taruhan spin 5 Lions Megaways (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWinAmount > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_fivelions',
+            gameName: '5 Lions Megaways',
+            type: 'gain',
+            amount: totalWinAmount,
+            balanceBefore: balBefore5L,
+            balanceAfter: user.coins,
+            description: `Menang 5 Lions Megaways (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, isFreeSpins, wildMultiplier }
+          });
+        }
 
         socket.emit('fivelions_result', {
           wildMultiplier,
@@ -2303,8 +2557,11 @@ function initSocketIO(io) {
         };
 
         const ROWS = 3, COLS = 5;
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, alwaysLose: isForcedLoss });
 
         const grid = [];
         for (let r = 0; r < ROWS; r++) {
@@ -2442,10 +2699,65 @@ function initSocketIO(io) {
         let triggerFreeSpins = !isFreeSpins && rtpOutcome.isScatter;
         let freeSpinsAwarded = triggerFreeSpins ? 8 : 0;
 
+        if (isForcedLoss) {
+          totalWinAmount = 0;
+          triggerFreeSpins = false;
+          freeSpinsAwarded = 0;
+          triggerJackpot = false;
+          jackpotWinAmount = 0;
+          winningSymbols.length = 0;
+        }
+
+        const balBeforeJinji = user ? user.coins : 0;
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
 
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWinAmount === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_jinji',
+              gameName: 'Jin Ji Bao Xi Slot',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeJinji + bet,
+              balanceAfter: user.coins,
+              description: `Kalah spin Jin Ji Bao Xi (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_jinji',
+              gameName: 'Jin Ji Bao Xi Slot',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeJinji + bet,
+              balanceAfter: balBeforeJinji,
+              description: `Taruhan spin Jin Ji Bao Xi (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWinAmount > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_jinji',
+            gameName: 'Jin Ji Bao Xi Slot',
+            type: 'gain',
+            amount: Math.floor(totalWinAmount),
+            balanceBefore: balBeforeJinji,
+            balanceAfter: user.coins,
+            description: `Menang Jin Ji Bao Xi Slot (Bet ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, isFreeSpins }
+          });
+        }
 
         socket.emit('jinji_result', {
           multGrid,
@@ -2533,7 +2845,9 @@ function initSocketIO(io) {
         };
 
         const ROWS = 4, COLS = 5;
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, alwaysLose: isForcedLoss });
         let currentGrid = [];
         let currentGoldGrid = [];
         let scatterCount = 0;
@@ -2720,13 +3034,65 @@ function initSocketIO(io) {
         }
 
         // Free Spins Trigger (3+ Scatters)
-        let triggerFreeSpins = scatterCount >= 3;
+        let triggerFreeSpins = !isForcedLoss && scatterCount >= 3;
         let freeSpinsAwarded = triggerFreeSpins ? 10 : 0;
 
+        if (isForcedLoss) {
+          totalWinAmount = 0;
+          triggerFreeSpins = false;
+          freeSpinsAwarded = 0;
+        }
+
+        const balBeforeMahjong = user ? user.coins : 0;
         user && (user.coins += Math.floor(totalWinAmount));
         if (!isGuestMode && user) await user.save();
 
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWinAmount === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_mahjong',
+              gameName: 'Mahjong Ways 2',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeMahjong + bet,
+              balanceAfter: user.coins,
+              description: `Kalah spin Mahjong Ways 2 (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_mahjong',
+              gameName: 'Mahjong Ways 2',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeMahjong + bet,
+              balanceAfter: balBeforeMahjong,
+              description: `Taruhan spin Mahjong Ways 2 (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWinAmount > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_mahjong',
+            gameName: 'Mahjong Ways 2',
+            type: 'gain',
+            amount: Math.floor(totalWinAmount),
+            balanceBefore: balBeforeMahjong,
+            balanceAfter: user.coins,
+            description: `Menang Mahjong Ways 2 (Bet ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, isFreeSpins }
+          });
+        }
 
         socket.emit('mahjong_result', {
           freeMult: isFreeSpins ? _ms.freeMult : 0,
@@ -2808,8 +3174,11 @@ function initSocketIO(io) {
           stickyWilds.forEach(w => currentStickyMap.set(`${w.r}-${w.c}`, w.mult));
         }
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // Low RTP & Hit Frequency Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, alwaysLose: isForcedLoss });
 
         for (let r = 0; r < ROWS; r++) {
           const row = [], mRow = [];
@@ -2968,14 +3337,66 @@ function initSocketIO(io) {
           }
         }
 
+        if (isForcedLoss) {
+          totalWinAmount = 0;
+          winningCells.clear();
+          newStickyWilds.length = 0;
+        }
+
         // Di Wild West Gold: pengali sudah dihitung per garis kemenangan yang melewati Wild (lineMult).
         // Jangan mengalikan ulang secara otomatis di setiap putaran Free Spins bila tidak kena Wild!
-        const triggerFreeSpins = isFreeSpins ? (scatterCount >= 2) : (scatterCount >= 3);
-        const freeSpinsAwarded = isFreeSpins ? (scatterCount >= 3 ? 8 : scatterCount === 2 ? 4 : 0) : (scatterCount >= 3 ? 8 : 0);
+        const triggerFreeSpins = isForcedLoss ? false : (isFreeSpins ? (scatterCount >= 2) : (scatterCount >= 3));
+        const freeSpinsAwarded = isForcedLoss ? 0 : (isFreeSpins ? (scatterCount >= 3 ? 8 : scatterCount === 2 ? 4 : 0) : (scatterCount >= 3 ? 8 : 0));
 
+        const balBeforeWW = user ? user.coins : 0;
         if (user) user.coins += Math.floor(totalWinAmount);
         if (!isGuestMode && user) await user.save();
         const newBalance = isGuestMode ? guestBalance + Math.floor(totalWinAmount) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWinAmount === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_wildwest',
+              gameName: 'Wild West Gold',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeWW + bet,
+              balanceAfter: user.coins,
+              description: `Kalah spin Wild West Gold (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_wildwest',
+              gameName: 'Wild West Gold',
+              type: 'spend',
+              amount: bet,
+              balanceBefore: balBeforeWW + bet,
+              balanceAfter: balBeforeWW,
+              description: `Taruhan spin Wild West Gold (Bet 🪙 ${bet.toLocaleString('id-ID')})`,
+              meta: { bet, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWinAmount > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_wildwest',
+            gameName: 'Wild West Gold',
+            type: 'gain',
+            amount: Math.floor(totalWinAmount),
+            balanceBefore: balBeforeWW,
+            balanceAfter: user.coins,
+            description: `Menang Wild West Gold (Bet ${bet.toLocaleString('id-ID')})`,
+            meta: { bet, isFreeSpins }
+          });
+        }
 
         socket.emit('wildwest_result', {
           multiplier: { steps: SLOT_LADDER, idx: 0, applied: 1, isFree: !!isFreeSpins, freeMult: 0 },
@@ -3061,8 +3482,11 @@ function initSocketIO(io) {
         };
         const rm = () => pickAuthenticMultiplier(500);
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // Low RTP & Hit Frequency Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode, alwaysLose: isForcedLoss });
 
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -3186,13 +3610,67 @@ function initSocketIO(io) {
           totalWin = 0;
         }
 
-        const spm = SP[Math.min(scatterCount, 6)] || 0;
+        if (isForcedLoss) {
+          totalWin = 0;
+          baseTumbleWin = 0;
+          finalMultiplier = 1;
+          _ms.freeMult = 0;
+        }
+
+        const spm = isForcedLoss ? 0 : (SP[Math.min(scatterCount, 6)] || 0);
         if (spm > 0) totalWin += betAmount * spm;
-        const tf = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
-        const fa = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 10 : 0);
+        const tf = isForcedLoss ? false : (isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4));
+        const fa = isForcedLoss ? 0 : (isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 10 : 0));
+
+        const balBeforeCandy = user ? user.coins : 0;
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWin === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_candy',
+              gameName: 'Candy Rush 1000',
+              type: 'spend',
+              amount: betAmount,
+              balanceBefore: balBeforeCandy + betAmount,
+              balanceAfter: user.coins,
+              description: `Kalah spin Candy Rush 1000 (Bet 🪙 ${betAmount.toLocaleString('id-ID')})`,
+              meta: { betAmount, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_candy',
+              gameName: 'Candy Rush 1000',
+              type: 'spend',
+              amount: betAmount,
+              balanceBefore: balBeforeCandy + betAmount,
+              balanceAfter: balBeforeCandy,
+              description: `Taruhan spin Candy Rush 1000 (Bet 🪙 ${betAmount.toLocaleString('id-ID')})`,
+              meta: { betAmount, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWin > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_candy',
+            gameName: 'Candy Rush 1000',
+            type: 'gain',
+            amount: Math.floor(totalWin),
+            balanceBefore: balBeforeCandy,
+            balanceAfter: user.coins,
+            description: `Menang Candy Rush 1000 (Bet ${betAmount.toLocaleString('id-ID')})`,
+            meta: { betAmount, isFreeSpins }
+          });
+        }
         socket.emit('candy_result', {
           freeMult: isFreeSpins ? (_ms.freeMult || 0) : 0,
           appliedMultiplier: finalMultiplier,
@@ -3661,8 +4139,41 @@ function initSocketIO(io) {
       try {
         const winnerUser = await User.findOne({ username: winnerUsername });
         if (winnerUser && pot > 0) {
+          const balBefore = winnerUser.coins;
           winnerUser.coins += pot;
           await winnerUser.save();
+
+          recordCoinLog({
+            username: winnerUser.username,
+            userId: winnerUser.userId,
+            source: match.mode || 'byone',
+            gameName: match.mode === 'billiard' ? 'Kings Billiard 8-Ball' : match.mode === 'qiuqiu' ? 'QiuQiu Royal' : 'Duel By One',
+            type: 'gain',
+            amount: pot,
+            balanceBefore: balBefore,
+            balanceAfter: winnerUser.coins,
+            description: `Menang Duel By One ${match.mode === 'billiard' ? 'Billiard' : 'QiuQiu'} (Pot ${pot.toLocaleString('id-ID')})`,
+            meta: { pot, matchId }
+          });
+        }
+
+        // Catat koin keluar / kalah untuk pemain yang kalah
+        const loserUsername = match.player1.username === winnerUsername ? match.player2.username : match.player1.username;
+        const loserUser = await User.findOne({ username: loserUsername });
+        if (loserUser && match.betAmount) {
+          const modeName = match.mode === 'billiard' ? 'Kings Billiard 8-Ball' : match.mode === 'qiuqiu' ? 'QiuQiu Royal' : 'Duel By One';
+          recordCoinLog({
+            username: loserUser.username,
+            userId: loserUser.userId,
+            source: match.mode || 'byone',
+            gameName: modeName,
+            type: 'spend',
+            amount: match.betAmount,
+            balanceBefore: loserUser.coins + match.betAmount,
+            balanceAfter: loserUser.coins,
+            description: `Kalah Duel By One ${match.mode === 'billiard' ? 'Billiard' : match.mode === 'qiuqiu' ? 'QiuQiu' : 'Domino'} (-${match.betAmount.toLocaleString('id-ID')} koin)`,
+            meta: { betAmount: match.betAmount, matchId }
+          });
         }
 
         const p1Sock = userSockets.get(match.player1.username) || match.player1.socketId;
@@ -3721,8 +4232,40 @@ function initSocketIO(io) {
           if (winnerObj) {
             const winnerUser = await User.findOne({ username: winnerObj.username });
             if (winnerUser && pot > 0) {
+              const balBefore = winnerUser.coins;
               winnerUser.coins += pot;
               await winnerUser.save();
+
+              recordCoinLog({
+                username: winnerUser.username,
+                userId: winnerUser.userId,
+                source: match.mode || 'byone',
+                gameName: match.mode === 'billiard' ? 'Kings Billiard 8-Ball' : match.mode === 'qiuqiu' ? 'QiuQiu Royal' : 'Duel By One',
+                type: 'gain',
+                amount: pot,
+                balanceBefore: balBefore,
+                balanceAfter: winnerUser.coins,
+                description: `Menang Duel By One (Lawan Keluar/Forfeit) (Pot ${pot.toLocaleString('id-ID')})`,
+                meta: { pot, matchId: foundKey }
+              });
+            }
+
+            // Catat koin keluar / kalah untuk pemain yang forfeit / keluar
+            const leaverUser = await User.findOne({ username: leaverName });
+            if (leaverUser && match.betAmount) {
+              const modeName = match.mode === 'billiard' ? 'Kings Billiard 8-Ball' : match.mode === 'qiuqiu' ? 'QiuQiu Royal' : 'Duel By One';
+              recordCoinLog({
+                username: leaverUser.username,
+                userId: leaverUser.userId,
+                source: match.mode || 'byone',
+                gameName: modeName,
+                type: 'spend',
+                amount: match.betAmount,
+                balanceBefore: leaverUser.coins + match.betAmount,
+                balanceAfter: leaverUser.coins,
+                description: `Kalah Duel By One (Keluar / Menyerah) (-${match.betAmount.toLocaleString('id-ID')} koin)`,
+                meta: { betAmount: match.betAmount, matchId: foundKey }
+              });
             }
 
             const payload = {
@@ -3875,8 +4418,11 @@ function initSocketIO(io) {
         // 2x-5x ~70%, 6x-12x ~20%, 15x-25x ~7.5%, 50x ~1.7%, 100x+ ~0.8% (Ultra rare)
         const pickMultVal = () => pickAuthenticMultiplier(1000);
 
+        // Forced loss check (Admin Kunci Kalah Slot)
+        const isForcedLoss = Boolean(user && user.slotAlwaysLose);
+
         // RTP 96.26% & Hit Frequency 15.05% Mathematical Model
-        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode });
+        const rtpOutcome = determineSpinOutcome({ isFreeSpins, anteMode, alwaysLose: isForcedLoss });
 
         let cg = [], cmg = [], scatterCount = 0;
         for (let r = 0; r < ROWS; r++) {
@@ -3898,7 +4444,7 @@ function initSocketIO(io) {
         }
 
         // KAPAN BOLA PENGALI TURUN (Peluang diturunkan agar sulit menang besar):
-        const gatoMultChance = isFreeSpins ? 0.12 : (anteMode ? 0.08 : 0.05);
+        const gatoMultChance = isForcedLoss ? 0 : (isFreeSpins ? 0.12 : (anteMode ? 0.08 : 0.05));
         if (Math.random() < gatoMultChance) {
           const or = Math.floor(Math.random() * ROWS);
           const oc = Math.floor(Math.random() * COLS);
@@ -4034,8 +4580,15 @@ function initSocketIO(io) {
           totalWin = 0;
         }
 
+        if (isForcedLoss) {
+          totalWin = 0;
+          baseTumbleWin = 0;
+          finalMultiplier = 1;
+          _ms.freeMult = 0;
+        }
+
         // Pembayaran Tunai Scatter (4: 3x, 5: 5x, 6+: 100x taruhan)
-        if (scatterCount >= 4) {
+        if (!isForcedLoss && scatterCount >= 4) {
           const spm = SP[Math.min(scatterCount, 6)] || 3;
           totalWin += Math.floor(betAmount * spm);
         }
@@ -4043,16 +4596,62 @@ function initSocketIO(io) {
         // ATURAN PEMICU & RETRIGGER PUTARAN GRATIS:
         // Base Game: 4 atau lebih Scatter memicu 15 Putaran Gratis.
         // Free Spins: 3 atau lebih Scatter memberikan +5 Putaran Gratis Tambahan!
-        const tf = isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4);
-        const fa = isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0);
+        const tf = isForcedLoss ? false : (isFreeSpins ? (scatterCount >= 3) : (scatterCount >= 4));
+        const fa = isForcedLoss ? 0 : (isFreeSpins ? (scatterCount >= 3 ? 5 : 0) : (scatterCount >= 4 ? 15 : 0));
 
         // BATAS MAKSIMUM KEMENANGAN (MAX WIN GATOTKACA 1000 = 15.000x BET)
         const maxWinCap = betAmount * 15000;
         if (totalWin > maxWinCap) totalWin = maxWinCap;
 
+        const balBeforeGato = user ? user.coins : 0;
         if (user) user.coins += Math.floor(totalWin);
         if (!isGuestMode && user) await user.save();
         const nb = isGuestMode ? guestBalance + Math.floor(totalWin) : (user.coins || 0) + (user.bonusCoins || 0);
+
+        if (user && !isFreeSpins) {
+          if (totalWin === 0) {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_gatokaca',
+              gameName: 'Gates of Gatotkaca 1000',
+              type: 'spend',
+              amount: betAmount,
+              balanceBefore: balBeforeGato + betAmount,
+              balanceAfter: user.coins,
+              description: `Kalah spin Gates of Gatotkaca 1000 (Bet 🪙 ${betAmount.toLocaleString('id-ID')})`,
+              meta: { betAmount, isFreeSpins: false }
+            });
+          } else {
+            recordCoinLog({
+              username: user.username,
+              userId: user.userId,
+              source: 'slot_gatokaca',
+              gameName: 'Gates of Gatotkaca 1000',
+              type: 'spend',
+              amount: betAmount,
+              balanceBefore: balBeforeGato + betAmount,
+              balanceAfter: balBeforeGato,
+              description: `Taruhan spin Gates of Gatotkaca 1000 (Bet 🪙 ${betAmount.toLocaleString('id-ID')})`,
+              meta: { betAmount, isFreeSpins: false }
+            });
+          }
+        }
+
+        if (user && totalWin > 0) {
+          recordCoinLog({
+            username: user.username,
+            userId: user.userId,
+            source: 'slot_gatokaca',
+            gameName: 'Gates of Gatotkaca 1000',
+            type: 'gain',
+            amount: Math.floor(totalWin),
+            balanceBefore: balBeforeGato,
+            balanceAfter: user.coins,
+            description: `Menang Gates of Gatotkaca 1000 ${finalMultiplier > 1 ? `Pengali ${finalMultiplier}x` : ''} (Bet ${betAmount.toLocaleString('id-ID')})`,
+            meta: { betAmount, finalMultiplier, isFreeSpins, scatterCount }
+          });
+        }
 
         socket.emit('gatokaca_result', {
           appliedMultiplier: finalMultiplier,

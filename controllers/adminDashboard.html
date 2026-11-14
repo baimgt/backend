@@ -1,0 +1,1383 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard — Kings Domino & Billiard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(20, 27, 45, 0.75);
+      --border: rgba(255, 215, 0, 0.25);
+      --gold: #ffd700;
+      --gold-dark: #b8860b;
+      --green: #10b981;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --text: #f8fafc;
+      --text-dim: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, var(--bg) 70%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .header h1 {
+      font-size: 26px;
+      font-weight: 900;
+      background: linear-gradient(135deg, #fff, var(--gold));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .nav-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding-bottom: 8px;
+    }
+    .nav-tab {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-dim);
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .nav-tab.active {
+      background: linear-gradient(135deg, rgba(255, 215, 0, 0.2), rgba(255, 143, 0, 0.2));
+      border-color: var(--gold);
+      color: var(--gold);
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .stat-val {
+      font-size: 26px;
+      font-weight: 900;
+      color: var(--gold);
+      margin-top: 6px;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 260px;
+      padding: 12px 18px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: #fff;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .search-input:focus {
+      border-color: var(--gold);
+    }
+    .table-card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      overflow-x: auto;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    th {
+      background: rgba(255, 215, 0, 0.05);
+      padding: 16px 20px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--gold);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    td {
+      padding: 16px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 14px;
+    }
+    tr:hover {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .user-cell {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 2px solid var(--gold);
+      background: #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      overflow: hidden;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .badge-admin {
+      background: rgba(255, 215, 0, 0.2);
+      border: 1px solid var(--gold);
+      color: var(--gold);
+    }
+    .badge-user {
+      background: rgba(148, 163, 184, 0.15);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      color: var(--text-dim);
+    }
+    .badge-locked {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid var(--red);
+      color: #f87171;
+    }
+    .badge-normal {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--green);
+      color: #34d399;
+    }
+    .btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+    .btn-gold {
+      background: linear-gradient(135deg, var(--gold), #ff8f00);
+      color: #000;
+    }
+    .btn-gold:hover {
+      box-shadow: 0 0 15px rgba(255, 215, 0, 0.4);
+    }
+    .btn-red {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid var(--red);
+      color: #f87171;
+    }
+    .btn-red:hover {
+      background: var(--red);
+      color: #fff;
+    }
+    .btn-green {
+      background: rgba(16, 185, 129, 0.2);
+      border: 1px solid var(--green);
+      color: #34d399;
+    }
+    .btn-green:hover {
+      background: var(--green);
+      color: #fff;
+    }
+    .btn-blue {
+      background: rgba(59, 130, 246, 0.2);
+      border: 1px solid var(--blue);
+      color: #60a5fa;
+    }
+    .btn-blue:hover {
+      background: var(--blue);
+      color: #fff;
+    }
+    .action-group {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    /* Modal Backdrop & Content */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(8px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-content {
+      background: #141b2d;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 850px;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .modal-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-header h3 {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--gold);
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 20px;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+    .modal-close:hover { color: #fff; }
+    .modal-body {
+      padding: 24px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .audit-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .audit-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .breakdown-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .breakdown-item {
+      background: rgba(255, 215, 0, 0.03);
+      border: 1px solid rgba(255, 215, 0, 0.15);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .gain-tag {
+      color: #34d399;
+      font-weight: 800;
+      font-family: monospace;
+    }
+    .spend-tag {
+      color: #f87171;
+      font-weight: 800;
+      font-family: monospace;
+    }
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      border: 1px solid var(--gold);
+      color: #fff;
+      padding: 14px 20px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      z-index: 2000;
+      display: none;
+      animation: toastIn 0.3s ease;
+    }
+    @keyframes toastIn {
+      from { transform: translateY(20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    /* AUTH OVERLAY MODAL (8-DIGIT PIN GATE) */
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 9, 18, 0.94);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+    .auth-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 440px;
+      background: linear-gradient(150deg, rgba(22, 30, 52, 0.96), rgba(11, 15, 27, 0.98));
+      border: 1px solid rgba(255, 215, 0, 0.35);
+      border-radius: 24px;
+      padding: 38px 32px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7), 0 0 45px rgba(255, 215, 0, 0.12);
+      text-align: center;
+      position: relative;
+      animation: authCardEnter 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes authCardEnter {
+      from { opacity: 0; transform: scale(0.92) translateY(20px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .auth-icon {
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 16px;
+      background: radial-gradient(circle, rgba(255, 215, 0, 0.25) 0%, rgba(255, 215, 0, 0.04) 70%);
+      border: 2px solid rgba(255, 215, 0, 0.45);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      box-shadow: 0 0 30px rgba(255, 215, 0, 0.25);
+    }
+    .auth-title {
+      font-size: 24px;
+      font-weight: 900;
+      color: #fff;
+      letter-spacing: -0.5px;
+      margin-bottom: 6px;
+    }
+    .auth-desc {
+      font-size: 13.5px;
+      color: var(--text-dim);
+      line-height: 1.5;
+      margin-bottom: 22px;
+    }
+    .pin-group {
+      text-align: left;
+      margin-bottom: 16px;
+    }
+    .pin-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--gold);
+      margin-bottom: 8px;
+    }
+    .pin-input-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .pin-input {
+      width: 100%;
+      background: rgba(9, 13, 24, 0.95);
+      border: 2px solid rgba(255, 215, 0, 0.3);
+      border-radius: 12px;
+      padding: 14px 48px 14px 16px;
+      font-size: 22px;
+      font-family: 'Outfit', monospace;
+      font-weight: 800;
+      letter-spacing: 6px;
+      text-align: center;
+      color: #fff;
+      outline: none;
+      transition: all 0.25s ease;
+    }
+    .pin-input:focus {
+      border-color: var(--gold);
+      box-shadow: 0 0 20px rgba(255, 215, 0, 0.35);
+    }
+    .pin-input:disabled {
+      background: rgba(22, 22, 32, 0.7);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #64748b;
+      cursor: not-allowed;
+    }
+    .btn-toggle-eye {
+      position: absolute;
+      right: 12px;
+      background: none;
+      border: none;
+      font-size: 18px;
+      cursor: pointer;
+      color: var(--text-dim);
+      padding: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s;
+    }
+    .btn-toggle-eye:hover {
+      color: var(--gold);
+    }
+    .auth-status-bar {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .attempt-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge-safe {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #10b981;
+    }
+    .badge-warning {
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid rgba(245, 158, 11, 0.5);
+      color: #f59e0b;
+    }
+    .badge-danger {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.5);
+      color: #ef4444;
+    }
+    .auth-error {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #fca5a5;
+      margin-bottom: 16px;
+      text-align: left;
+      line-height: 1.4;
+    }
+    .auth-lock-banner {
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(185, 28, 28, 0.35));
+      border: 2px solid #ef4444;
+      border-radius: 14px;
+      padding: 18px 16px;
+      margin-bottom: 20px;
+      text-align: center;
+      animation: lockPulse 2s infinite ease-in-out;
+    }
+    @keyframes lockPulse {
+      0%, 100% { box-shadow: 0 0 15px rgba(239, 68, 68, 0.35); }
+      50% { box-shadow: 0 0 35px rgba(239, 68, 68, 0.65); }
+    }
+    .lock-timer {
+      font-family: monospace;
+      font-size: 34px;
+      font-weight: 900;
+      color: #fca5a5;
+      margin-top: 8px;
+      letter-spacing: 3px;
+    }
+    .btn-login-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #ffd700, #ff9800);
+      border: none;
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 15px;
+      font-weight: 800;
+      color: #0b0f19;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 6px 20px rgba(255, 215, 0, 0.3);
+    }
+    .btn-login-submit:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px rgba(255, 215, 0, 0.45);
+    }
+    .btn-login-submit:disabled {
+      background: #334155;
+      color: #94a3b8;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+  </style>
+</head>
+<body>
+  <!-- Admin PIN/Password Gate Modal -->
+  <div id="adminLoginOverlay" class="auth-overlay">
+    <div class="auth-card">
+      <div class="auth-icon">🔐</div>
+      <h2 class="auth-title">Akses Khusus Admin</h2>
+      <p class="auth-desc">Kings Domino & Billiard Control Panel.<br>Masukkan 8 digit kode keamanan admin.</p>
+      
+      <div id="authLockBanner" class="auth-lock-banner" style="display: none;">
+        <div style="font-size: 30px; margin-bottom: 6px;">⛔</div>
+        <strong style="color: #fca5a5; font-size: 16px; display: block; margin-bottom: 4px;">AKSES TERKUNCI (1 JAM)</strong>
+        <span style="font-size: 12.5px; color: #fecaca; display: block;">Anda telah salah memasukkan password sebanyak 3 kali berturut-turut.</span>
+        <div class="lock-timer" id="authCountdown">60:00</div>
+        <span style="font-size: 11px; color: #94a3b8; display: block; margin-top: 6px;">Silakan tunggu hingga waktu selesai untuk mencoba kembali.</span>
+      </div>
+
+      <form id="adminLoginForm" onsubmit="handleAdminLogin(event)">
+        <div class="pin-group">
+          <label for="adminPasswordInput" class="pin-label">Password Admin (8 Digit)</label>
+          <div class="pin-input-wrapper">
+            <input 
+              type="password" 
+              id="adminPasswordInput" 
+              class="pin-input"
+              maxlength="8" 
+              inputmode="numeric"
+              placeholder="••••••••" 
+              autocomplete="current-password"
+              oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 8)"
+              required
+            />
+            <button type="button" class="btn-toggle-eye" onclick="togglePasswordVisibility()" title="Lihat/Sembunyikan Password">👁️</button>
+          </div>
+        </div>
+
+        <div class="auth-status-bar" id="authStatusBar">
+          <span id="attemptInfo" class="attempt-badge badge-safe">Sisa Percobaan: 3 / 3</span>
+        </div>
+
+        <div id="authErrorMessage" class="auth-error" style="display: none;"></div>
+
+        <button type="submit" id="adminLoginBtn" class="btn-login-submit">
+          🔓 Buka Dashboard Admin
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="header">
+    <h1>👑 Kings Domino & Slot — Admin Dashboard</h1>
+    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+      <span style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); color: #10b981; padding: 5px 12px; border-radius: 20px; font-weight: 700; font-size: 12px;">🛡️ Admin Terautentikasi</span>
+      <button onclick="adminLogout()" class="btn btn-red" style="padding: 6px 14px; font-size: 12px;">🚪 Keluar</button>
+    </div>
+  </div>
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" id="tabUsersBtn" onclick="switchTab('users')">👥 Kelola Pemain & Kunci Slot</button>
+    <button class="nav-tab" id="tabLogsBtn" onclick="switchTab('logs')">📊 Audit Log Sumber Koin (Semua Game)</button>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Pemain Terdaftar</div>
+      <div class="stat-val" id="statTotal">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Akun Admin</div>
+      <div class="stat-val" id="statAdmins">0</div>
+    </div>
+    <div class="stat-card" style="border-color: rgba(239, 68, 68, 0.4);">
+      <div class="stat-label" style="color: #f87171;">🚫 Akun Terkunci Kalah Slot</div>
+      <div class="stat-val" style="color: #ef4444;" id="statSlotLocked">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Fitur Anti-Menang Slot</div>
+      <div class="stat-val" style="font-size: 15px; color: #34d399; margin-top: 8px;">
+        🔒 RTP 0% & Guaranteed Loss Active
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 1: USERS & SLOT LOCK -->
+  <div id="sectionUsers">
+    <div class="controls">
+      <input type="text" id="searchInput" class="search-input" placeholder="🔍 Cari username atau 8-digit Player ID..." onkeyup="handleSearch(event)">
+      <button class="btn btn-gold" onclick="loadUsers()">🔄 Segarkan Data</button>
+    </div>
+
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Pemain</th>
+            <th>ID Pemain</th>
+            <th>Role</th>
+            <th>Status Slot</th>
+            <th>Saldo Koin</th>
+            <th>VIP</th>
+            <th style="text-align: right;">Aksi Kontrol</th>
+          </tr>
+        </thead>
+        <tbody id="userTableBody">
+          <tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 40px;">Memuat data pemain...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- TAB 2: GLOBAL AUDIT COIN LOGS -->
+  <div id="sectionLogs" style="display: none;">
+    <div class="controls">
+      <input type="text" id="logSearchInput" class="search-input" placeholder="🔍 Filter username atau Player ID..." onkeyup="handleLogSearch(event)">
+      <select id="logSourceFilter" class="search-input" style="max-width: 220px;" onchange="loadGlobalLogs()">
+        <option value="">Semua Game & Sumber</option>
+        <option value="slot_zeus">Gates of Olympus</option>
+        <option value="slot_mahjong">Mahjong Ways 2</option>
+        <option value="slot_gatokaca">Gates of Gatotkaca</option>
+        <option value="slot_candy">Candy Rush 1000</option>
+        <option value="slot_fafafa">Fafafa 2</option>
+        <option value="slot_fivelions">5 Lions Megaways</option>
+        <option value="slot_jinji">Jin Ji Bao Xi</option>
+        <option value="slot_wildwest">Wild West Gold</option>
+        <option value="slot_duofu">DuoFuDuoCai</option>
+        <option value="billiard">Billiard 8-Ball</option>
+        <option value="qiuqiu">QiuQiu Royal</option>
+        <option value="domino">Domino Gaple</option>
+        <option value="transfer_in">Terima Transfer</option>
+        <option value="transfer_out">Kirim Transfer</option>
+        <option value="daily_bonus">Bonus Harian</option>
+        <option value="shop_topup">Toko Koin (Top Up)</option>
+        <option value="admin_adjust">Admin Adjustment</option>
+      </select>
+      <button class="btn btn-gold" onclick="loadGlobalLogs()">🔄 Muat Log</button>
+    </div>
+
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Waktu</th>
+            <th>Pemain</th>
+            <th>Game / Sumber</th>
+            <th>Tipe</th>
+            <th>Jumlah Koin</th>
+            <th>Saldo Sesudah</th>
+            <th>Keterangan</th>
+          </tr>
+        </thead>
+        <tbody id="globalLogTableBody">
+          <tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 40px;">Pilih filter dan klik Muat Log...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- MODAL: CEK LOG KOIN PEMAIN (DARI MANA KOIN BANYAK DIDAPAT) -->
+  <div id="userLogModal" class="modal-backdrop">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modalUserTitle">📜 Audit Sumber Koin Pemain</h3>
+        <button class="modal-close" onclick="closeUserLogModal()">✖</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom: 16px;">
+          <h4 style="font-size: 14px; text-transform: uppercase; color: var(--gold); letter-spacing: 0.05em; margin-bottom: 10px;">
+            📊 Rincian Dari Mana Koin Diperoleh (Kok Bisa Koinnya Banyak):
+          </h4>
+          <div class="audit-summary">
+            <div class="audit-card">
+              <div class="stat-label">Total Koin Diperoleh</div>
+              <div class="stat-val" style="font-size: 20px; color: #34d399;" id="modalTotalGained">🪙 0</div>
+            </div>
+            <div class="audit-card">
+              <div class="stat-label">Total Koin Keluar/Taruhan</div>
+              <div class="stat-val" style="font-size: 20px; color: #f87171;" id="modalTotalSpent">🪙 0</div>
+            </div>
+            <div class="audit-card">
+              <div class="stat-label">Selisih Bersih (Net Gain)</div>
+              <div class="stat-val" style="font-size: 20px; color: var(--gold);" id="modalNetChange">🪙 0</div>
+            </div>
+          </div>
+
+          <div id="modalBreakdownList" class="breakdown-list">
+            <!-- Filled via JS -->
+          </div>
+        </div>
+
+        <h4 style="font-size: 14px; text-transform: uppercase; color: var(--gold); letter-spacing: 0.05em; margin-bottom: 10px;">
+          🕒 Riwayat Transaksi & Menang Terbaru:
+        </h4>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>Waktu</th>
+                <th>Game / Sumber</th>
+                <th>Jumlah</th>
+                <th>Saldo Akhir</th>
+                <th>Keterangan</th>
+              </tr>
+            </thead>
+            <tbody id="modalLogTableBody">
+              <tr><td colspan="5" style="text-align: center; color: var(--text-dim); padding: 30px;">Memuat log koin...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let searchTimeout;
+    let logSearchTimeout;
+    let activeTab = 'users';
+    let countdownInterval = null;
+
+    function getAuthHeaders() {
+      const token = localStorage.getItem('admin_token') || '';
+      return {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+        'x-admin-token': token
+      };
+    }
+
+    async function adminFetch(url, options = {}) {
+      options.headers = {
+        ...getAuthHeaders(),
+        ...(options.headers || {})
+      };
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        showLoginOverlay('Sesi admin telah kedaluwarsa. Silakan login kembali.');
+        throw new Error('Unauthorized');
+      }
+      return res;
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 4500);
+    }
+
+    function switchTab(tab) {
+      activeTab = tab;
+      document.getElementById('tabUsersBtn').classList.toggle('active', tab === 'users');
+      document.getElementById('tabLogsBtn').classList.toggle('active', tab === 'logs');
+      document.getElementById('sectionUsers').style.display = tab === 'users' ? 'block' : 'none';
+      document.getElementById('sectionLogs').style.display = tab === 'logs' ? 'block' : 'none';
+      if (tab === 'logs') loadGlobalLogs();
+    }
+
+    function handleAvatarError(img) {
+      if (!img) return;
+      var span = document.createElement('span');
+      span.innerText = '👤';
+      span.className = 'user-avatar';
+      if (img.parentNode) {
+        img.parentNode.replaceChild(span, img);
+      }
+    }
+
+    function renderAvatar(avatar) {
+      if (!avatar) return '<div class="user-avatar">🐸</div>';
+      var str = String(avatar).trim();
+      if (str.startsWith('data:image/') || str.startsWith('http://') || str.startsWith('https://')) {
+        return '<img src="' + str + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
+      }
+      if (str.length > 50) {
+        var src = str.startsWith('data:') ? str : ('data:image/jpeg;base64,' + str);
+        return '<img src="' + src + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
+      }
+      return '<div class="user-avatar">' + str + '</div>';
+    }
+
+    function formatDate(d) {
+      if (!d) return '-';
+      const dt = new Date(d);
+      return dt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' +
+             dt.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    // --- AUTHENTICATION & LOCKOUT FUNCTIONS ---
+    function updateCountdownUI(remainingSeconds) {
+      const banner = document.getElementById('authLockBanner');
+      const timer = document.getElementById('authCountdown');
+      const input = document.getElementById('adminPasswordInput');
+      const submitBtn = document.getElementById('adminLoginBtn');
+      const statusBar = document.getElementById('authStatusBar');
+      const errDiv = document.getElementById('authErrorMessage');
+
+      if (remainingSeconds > 0) {
+        banner.style.display = 'block';
+        input.disabled = true;
+        submitBtn.disabled = true;
+        statusBar.style.display = 'none';
+        errDiv.style.display = 'none';
+
+        const m = Math.floor(remainingSeconds / 60);
+        const s = remainingSeconds % 60;
+        const formatted = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        timer.innerText = formatted;
+        submitBtn.innerText = '⛔ Akses Terkunci (' + formatted + ')';
+      } else {
+        banner.style.display = 'none';
+        input.disabled = false;
+        submitBtn.disabled = false;
+        statusBar.style.display = 'flex';
+        submitBtn.innerText = '🔓 Buka Dashboard Admin';
+        updateAttemptBadge(3);
+        if (countdownInterval) {
+          clearInterval(countdownInterval);
+          countdownInterval = null;
+        }
+      }
+    }
+
+    function startCountdown(totalSeconds) {
+      if (countdownInterval) clearInterval(countdownInterval);
+      let remaining = totalSeconds;
+      updateCountdownUI(remaining);
+
+      countdownInterval = setInterval(() => {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(countdownInterval);
+          countdownInterval = null;
+          updateCountdownUI(0);
+          checkAuthStatus();
+        } else {
+          updateCountdownUI(remaining);
+        }
+      }, 1000);
+    }
+
+    function updateAttemptBadge(attemptsLeft) {
+      const badge = document.getElementById('attemptInfo');
+      if (!badge) return;
+      badge.className = 'attempt-badge';
+
+      if (attemptsLeft === 3) {
+        badge.classList.add('badge-safe');
+        badge.innerText = 'Sisa Percobaan: 3 / 3';
+      } else if (attemptsLeft === 2) {
+        badge.classList.add('badge-warning');
+        badge.innerText = 'Sisa Percobaan: 2 / 3';
+      } else if (attemptsLeft === 1) {
+        badge.classList.add('badge-danger');
+        badge.innerText = '⚠️ Sisa Percobaan: 1 / 3 (Peringatan!)';
+      } else {
+        badge.classList.add('badge-danger');
+        badge.innerText = 'Sisa Percobaan: 0 / 3 (Terkunci)';
+      }
+    }
+
+    function showLoginOverlay(msg) {
+      const overlay = document.getElementById('adminLoginOverlay');
+      overlay.classList.remove('hidden');
+      const errDiv = document.getElementById('authErrorMessage');
+      if (msg) {
+        errDiv.innerText = msg;
+        errDiv.style.display = 'block';
+      }
+      const input = document.getElementById('adminPasswordInput');
+      if (input && !input.disabled) {
+        input.value = '';
+        setTimeout(() => input.focus(), 200);
+      }
+    }
+
+    function hideLoginOverlay() {
+      const overlay = document.getElementById('adminLoginOverlay');
+      overlay.classList.add('hidden');
+      if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+      }
+    }
+
+    async function checkAuthStatus() {
+      try {
+        const res = await fetch('/api/admin/auth-status', {
+          headers: getAuthHeaders()
+        });
+        const d = await res.json();
+        if (d.locked) {
+          showLoginOverlay();
+          startCountdown(d.remainingLockSeconds || 3600);
+          return;
+        }
+
+        if (d.authenticated) {
+          hideLoginOverlay();
+          loadUsers();
+        } else {
+          showLoginOverlay();
+          updateAttemptBadge(d.attemptsLeft !== undefined ? d.attemptsLeft : 3);
+        }
+      } catch (err) {
+        console.error('Error checkAuthStatus:', err);
+        showLoginOverlay();
+      }
+    }
+
+    async function handleAdminLogin(e) {
+      e.preventDefault();
+      const input = document.getElementById('adminPasswordInput');
+      const errDiv = document.getElementById('authErrorMessage');
+      const submitBtn = document.getElementById('adminLoginBtn');
+      const pwd = input.value.trim();
+
+      if (pwd.length !== 8) {
+        errDiv.innerText = 'Password harus persis 8 digit angka.';
+        errDiv.style.display = 'block';
+        return;
+      }
+
+      errDiv.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Memverifikasi...';
+
+      try {
+        const res = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd })
+        });
+        const d = await res.json();
+
+        if (res.status === 429 || d.locked) {
+          startCountdown(d.remainingLockSeconds || 3600);
+          errDiv.innerText = d.error || 'Akses terkunci 1 jam karena salah 3 kali.';
+          errDiv.style.display = 'block';
+          return;
+        }
+
+        if (!d.success) {
+          updateAttemptBadge(d.attemptsLeft !== undefined ? d.attemptsLeft : 0);
+          errDiv.innerText = d.error || 'Password salah!';
+          errDiv.style.display = 'block';
+          input.value = '';
+          input.focus();
+          return;
+        }
+
+        // Login success!
+        localStorage.setItem('admin_token', d.token);
+        hideLoginOverlay();
+        loadUsers();
+      } catch (err) {
+        errDiv.innerText = 'Gagal menghubungi server: ' + err.message;
+        errDiv.style.display = 'block';
+      } finally {
+        const banner = document.getElementById('authLockBanner');
+        if (banner.style.display !== 'block') {
+          submitBtn.disabled = false;
+          submitBtn.innerText = '🔓 Buka Dashboard Admin';
+        }
+      }
+    }
+
+    async function adminLogout() {
+      if (!confirm('Apakah Anda yakin ingin keluar dari Admin Dashboard?')) return;
+      try {
+        await fetch('/api/admin/logout', {
+          method: 'POST',
+          headers: getAuthHeaders()
+        });
+      } catch (err) {}
+      localStorage.removeItem('admin_token');
+      showLoginOverlay();
+      checkAuthStatus();
+    }
+
+    function togglePasswordVisibility() {
+      const input = document.getElementById('adminPasswordInput');
+      const eyeBtn = document.querySelector('.btn-toggle-eye');
+      if (input.type === 'password') {
+        input.type = 'text';
+        eyeBtn.innerText = '🙈';
+      } else {
+        input.type = 'password';
+        eyeBtn.innerText = '👁️';
+      }
+    }
+
+    // --- DASHBOARD DATA FUNCTIONS ---
+    async function loadUsers(query = '') {
+      const tbody = document.getElementById('userTableBody');
+      try {
+        const res = await adminFetch('/api/admin/users?q=' + encodeURIComponent(query));
+        const data = await res.json();
+        if (!data.success) {
+          if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #ef4444; padding: 40px;">Gagal memuat: ' + (data.error || 'Server error') + '</td></tr>';
+          return;
+        }
+
+        document.getElementById('statTotal').innerText = Number(data.total || 0).toLocaleString('id-ID');
+        document.getElementById('statAdmins').innerText = Number(data.totalAdmins || 0).toLocaleString('id-ID');
+        document.getElementById('statSlotLocked').innerText = Number(data.totalSlotLocked || 0).toLocaleString('id-ID');
+
+        if (!data.users || data.users.length === 0) {
+          if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 40px;">Tidak ada pemain ditemukan.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.users.map(u => {
+          const isAdmin = u.role === 'admin' || u.isAdmin;
+          const isSlotLocked = Boolean(u.slotAlwaysLose);
+          return `
+            <tr>
+              <td>
+                <div class="user-cell">
+                  ${renderAvatar(u.avatar)}
+                  <div>
+                    <div style="font-weight: 700; color: #fff;">${u.username}</div>
+                  </div>
+                </div>
+              </td>
+              <td style="font-family: monospace; color: var(--gold); font-weight: 700;">${u.userId || '-'}</td>
+              <td>
+                ${isAdmin 
+                  ? '<span class="badge badge-admin">⭐ ADMIN</span>' 
+                  : '<span class="badge badge-user">USER</span>'}
+              </td>
+              <td>
+                ${isSlotLocked
+                  ? '<span class="badge badge-locked">🚫 PASTI KALAH (RTP 0%)</span>'
+                  : '<span class="badge badge-normal">✅ NORMAL</span>'}
+              </td>
+              <td style="font-weight: 800; color: #ffd700;">🪙 ${(u.coins || 0).toLocaleString('id-ID')}</td>
+              <td><span style="color: var(--gold); font-weight: 700;">VIP ${u.vipLevel || 0}</span></td>
+              <td>
+                <div class="action-group">
+                  <!-- TOMBOL AUDIT KOIN -->
+                  <button 
+                    onclick="viewUserLogs('${u.username}', '${u.userId || ''}')" 
+                    class="btn btn-blue"
+                    title="Audit Dari Mana Koin Banyak Didapat">
+                    📜 Audit Koin
+                  </button>
+
+                  <!-- TOMBOL TOGGLE KUNCI SLOT (RTP 0% PASTI KALAH) -->
+                  <button 
+                    onclick="toggleSlotLock('${u.username}', ${!isSlotLocked})" 
+                    class="btn ${isSlotLocked ? 'btn-green' : 'btn-red'}"
+                    title="${isSlotLocked ? 'Buka Kunci Slot (Kembali Normal)' : 'Kunci Akun Ini: PASTI KALAH DI SEMUA SLOT (RTP 0%)'}">
+                    ${isSlotLocked ? '🔓 Lepas Kunci Slot' : '🚫 Kunci Pasti Kalah'}
+                  </button>
+
+                  <!-- TOMBOL ATUR KOIN -->
+                  <button 
+                    onclick="promptAdjustCoins('${u.username}', ${u.coins || 0})" 
+                    class="btn btn-gold" 
+                    title="Atur Saldo Koin">
+                    🪙 Atur Koin
+                  </button>
+
+                  <!-- TOMBOL SET ROLE -->
+                  <button 
+                    onclick="toggleRole('${u.username}', '${isAdmin ? 'user' : 'admin'}')" 
+                    class="btn ${isAdmin ? 'btn-red' : 'btn-gold'}" 
+                    style="font-size: 11px;">
+                    ${isAdmin ? 'Demote ke User' : '⭐ Jadikan Admin'}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        if (err.message !== 'Unauthorized' && tbody) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #ef4444; padding: 40px;">Terjadi kesalahan saat memuat data.</td></tr>';
+        }
+      }
+    }
+
+    async function toggleRole(username, newRole) {
+      const confirmMsg = newRole === 'admin'
+        ? `Apakah Anda yakin ingin menjadikan ${username} sebagai ADMIN?\n(Akun admin otomatis disembunyikan dari Leaderboard)`
+        : `Apakah Anda yakin ingin menurunkan role ${username} menjadi USER biasa?`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await adminFetch('/api/admin/set-role', {
+          method: 'POST',
+          body: JSON.stringify({ username, role: newRole })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast(d.message);
+          loadUsers(document.getElementById('searchInput').value);
+        } else {
+          alert('Gagal: ' + (d.error || 'Server error'));
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') alert('Kesalahan jaringan: ' + err.message);
+      }
+    }
+
+    async function promptAdjustCoins(username, currentCoins) {
+      const input = prompt(`Masukkan jumlah saldo koin baru untuk pemain "${username}":`, currentCoins);
+      if (input === null) return;
+      const num = parseInt(input.replace(/[^0-9]/g, ''));
+      if (isNaN(num) || num < 0) {
+        alert('Jumlah koin harus berupa angka non-negatif!');
+        return;
+      }
+
+      try {
+        const res = await adminFetch('/api/admin/adjust-coins', {
+          method: 'POST',
+          body: JSON.stringify({ username, coins: num })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast(d.message);
+          loadUsers(document.getElementById('searchInput').value);
+        } else {
+          alert('Gagal: ' + (d.error || 'Server error'));
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') alert('Kesalahan jaringan: ' + err.message);
+      }
+    }
+
+    async function toggleSlotLock(username, makeLocked) {
+      const confirmMsg = makeLocked
+        ? `⚠️ PERINGATAN KUNCI SLOT!\n\nApakah Anda yakin ingin MENGUNCI akun "${username}" supaya TIDAK BISA MENANG di slot mana pun?\n\nPemain ini akan disetting RTP 0% & dijamin selalu rungkad/kalah!`
+        : `Buka kunci slot akun "${username}" agar permainan slot kembali normal?`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await adminFetch('/api/admin/toggle-slot-lock', {
+          method: 'POST',
+          body: JSON.stringify({ username, slotAlwaysLose: makeLocked })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast(d.message);
+          loadUsers(document.getElementById('searchInput').value);
+        } else {
+          alert('Gagal: ' + (d.error || 'Server error'));
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') alert('Kesalahan jaringan: ' + err.message);
+      }
+    }
+
+    async function viewUserLogs(username, userId) {
+      const modal = document.getElementById('userLogModal');
+      document.getElementById('modalUserTitle').innerText = '📜 Audit Sumber Koin: ' + username + (userId ? ' (ID: ' + userId + ')' : '');
+      document.getElementById('modalTotalGained').innerText = '🪙 ...';
+      document.getElementById('modalTotalSpent').innerText = '🪙 ...';
+      document.getElementById('modalNetChange').innerText = '🪙 ...';
+      document.getElementById('modalBreakdownList').innerHTML = '<div style="color: var(--text-dim); padding: 10px;">Menganalisis sumber koin...</div>';
+      const tbody = document.getElementById('modalLogTableBody');
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-dim); padding: 30px;">Memuat riwayat transaksi...</td></tr>';
+
+      modal.style.display = 'flex';
+
+      try {
+        const res = await adminFetch('/api/admin/coin-logs?username=' + encodeURIComponent(username) + '&limit=100');
+        const d = await res.json();
+        if (!d.success) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #ef4444; padding: 20px;">' + (d.error || 'Gagal memuat log') + '</td></tr>';
+          return;
+        }
+
+        const stats = d.stats || {};
+        document.getElementById('modalTotalGained').innerText = '🪙 ' + Number(stats.totalGained || 0).toLocaleString('id-ID');
+        document.getElementById('modalTotalSpent').innerText = '🪙 ' + Number(stats.totalSpent || 0).toLocaleString('id-ID');
+        const net = Number(stats.netChange || 0);
+        const netEl = document.getElementById('modalNetChange');
+        netEl.innerText = (net >= 0 ? '+' : '') + '🪙 ' + net.toLocaleString('id-ID');
+        netEl.style.color = net >= 0 ? '#34d399' : '#f87171';
+
+        // Render breakdown list
+        const bd = stats.breakdownByGame || [];
+        const bdList = document.getElementById('modalBreakdownList');
+        if (bd.length === 0) {
+          bdList.innerHTML = '<div style="color: var(--text-dim); padding: 10px;">Belum ada catatan aktivitas game.</div>';
+        } else {
+          bdList.innerHTML = bd.map(item => {
+            const gained = item.totalGained !== undefined ? item.totalGained : (item.totalAmount || 0);
+            const spent = item.totalSpent || 0;
+            const net = gained - spent;
+            const wins = item.winCount !== undefined ? item.winCount : item.count || 0;
+            const losses = item.loseCount || 0;
+            return `
+              <div class="breakdown-item" style="flex-direction: column; align-items: stretch; gap: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <div style="font-weight: 800; color: #fff; font-size: 14.5px;">${item._id || item.source}</div>
+                  <div style="font-size: 11.5px; color: var(--text-dim);">
+                    <span style="color: #34d399;">${wins}x Menang</span> • <span style="color: #f87171;">${losses}x Kalah/Taruhan</span>
+                  </div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.06);">
+                  <div>
+                    <span style="color: #34d399; font-weight: 700; font-family: monospace;">+🪙 ${Number(gained).toLocaleString('id-ID')}</span>
+                    <span style="color: var(--text-dim); margin: 0 4px;">/</span>
+                    <span style="color: #f87171; font-weight: 700; font-family: monospace;">-🪙 ${Number(spent).toLocaleString('id-ID')}</span>
+                  </div>
+                  <div style="font-weight: 800; font-family: monospace; color: ${net >= 0 ? '#ffd700' : '#f87171'};">
+                    Net: ${net >= 0 ? '+' : ''}🪙 ${Number(net).toLocaleString('id-ID')}
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('');
+        }
+
+        // Render logs table
+        const logs = d.logs || [];
+        if (logs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-dim); padding: 30px;">Tidak ada riwayat koin tercatat.</td></tr>';
+        } else {
+          tbody.innerHTML = logs.map(l => {
+            const isGain = l.type === 'gain';
+            return `
+              <tr>
+                <td style="font-size: 12px; color: var(--text-dim); white-space: nowrap;">${formatDate(l.createdAt)}</td>
+                <td style="font-weight: 700; color: #fff;">${l.gameName || l.source}</td>
+                <td class="${isGain ? 'gain-tag' : 'spend-tag'}">
+                  ${isGain ? '+' : '-'}🪙 ${Number(l.amount).toLocaleString('id-ID')}
+                </td>
+                <td style="font-family: monospace; color: var(--gold);">🪙 ${Number(l.balanceAfter || 0).toLocaleString('id-ID')}</td>
+                <td style="font-size: 12.5px; color: #cbd5e1;">${l.description || '-'}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #ef4444; padding: 20px;">Terjadi kesalahan: ' + err.message + '</td></tr>';
+        }
+      }
+    }
+
+    function closeUserLogModal() {
+      document.getElementById('userLogModal').style.display = 'none';
+    }
+
+    async function loadGlobalLogs() {
+      const tbody = document.getElementById('globalLogTableBody');
+      const q = document.getElementById('logSearchInput').value;
+      const src = document.getElementById('logSourceFilter').value;
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 30px;">Memuat riwayat log koin...</td></tr>';
+
+      try {
+        let url = '/api/admin/coin-logs?limit=100';
+        if (q.trim()) url += '&username=' + encodeURIComponent(q.trim());
+        if (src.trim()) url += '&source=' + encodeURIComponent(src.trim());
+
+        const res = await adminFetch(url);
+        const d = await res.json();
+        if (!d.success) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #ef4444; padding: 20px;">' + (d.error || 'Gagal') + '</td></tr>';
+          return;
+        }
+
+        const logs = d.logs || [];
+        if (logs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 30px;">Tidak ada catatan log ditemukan.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = logs.map(l => {
+          const isGain = l.type === 'gain';
+          return `
+            <tr>
+              <td style="font-size: 12px; color: var(--text-dim); white-space: nowrap;">${formatDate(l.createdAt)}</td>
+              <td style="font-weight: 700; color: #fff;">${l.username}</td>
+              <td><span style="font-weight: 700; color: var(--gold);">${l.gameName || l.source}</span></td>
+              <td><span class="badge ${isGain ? 'badge-normal' : 'badge-user'}">${isGain ? 'MASUK' : 'KELUAR'}</span></td>
+              <td class="${isGain ? 'gain-tag' : 'spend-tag'}">
+                ${isGain ? '+' : '-'}🪙 ${Number(l.amount).toLocaleString('id-ID')}
+              </td>
+              <td style="font-family: monospace; color: var(--gold);">🪙 ${Number(l.balanceAfter || 0).toLocaleString('id-ID')}</td>
+              <td style="font-size: 12.5px; color: #cbd5e1;">${l.description || '-'}</td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        if (err.message !== 'Unauthorized') {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #ef4444; padding: 20px;">Kesalahan: ' + err.message + '</td></tr>';
+        }
+      }
+    }
+
+    function handleSearch(e) {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        loadUsers(e.target.value);
+      }, 300);
+    }
+
+    function handleLogSearch(e) {
+      clearTimeout(logSearchTimeout);
+      logSearchTimeout = setTimeout(() => {
+        loadGlobalLogs();
+      }, 350);
+    }
+
+    window.onload = () => checkAuthStatus();
+  </script>
+</body>
+</html>

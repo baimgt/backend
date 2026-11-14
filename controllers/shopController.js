@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const InboxMessage = require('../models/InboxMessage');
 const PaymentRecord = require('../models/PaymentRecord');
+const { recordCoinLog } = require('../helpers/coinLogger');
 
 // Store catalog definitions
 const COIN_PACKAGES = [
@@ -47,8 +48,22 @@ exports.buyCoins = async (req, res) => {
     const pkg = COIN_PACKAGES.find(p => p.id === packageId);
     if (!pkg) return res.status(400).json({ error: 'Paket koin tidak ditemukan' });
 
+    const balBefore = user.coins;
     user.coins += pkg.coins;
     await user.save();
+
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'shop_topup',
+      gameName: 'Toko Koin (Top Up)',
+      type: 'gain',
+      amount: pkg.coins,
+      balanceBefore: balBefore,
+      balanceAfter: user.coins,
+      description: `Beli paket ${pkg.name} (${pkg.priceRp})`,
+      meta: { packageId: pkg.id }
+    });
 
     // Kirim bukti pembelian ke Inbox
     await InboxMessage.create({
@@ -131,8 +146,22 @@ exports.buyVip = async (req, res) => {
     if (!vip) return res.status(400).json({ error: 'Paket VIP tidak ditemukan' });
 
     user.vipLevel = Math.max(user.vipLevel || 0, vip.level);
+    const balBeforeVip = user.coins;
     user.coins += vip.coinsBonus;
     await user.save();
+
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'vip_bonus',
+      gameName: 'Upgrade VIP',
+      type: 'gain',
+      amount: vip.coinsBonus,
+      balanceBefore: balBeforeVip,
+      balanceAfter: user.coins,
+      description: `Bonus koin dari upgrade status ${vip.name}`,
+      meta: { vipId: vip.id, level: vip.level }
+    });
 
     await InboxMessage.create({
       toUsername: username,
@@ -175,8 +204,22 @@ exports.convertRp = async (req, res) => {
     const rpUsed = Math.floor(rpToConvert / 10) * 10;
 
     user.rp -= rpUsed;
+    const balBeforeRp = user.coins;
     user.coins += coinsGained;
     await user.save();
+
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'rp_exchange',
+      gameName: 'Tukar RP',
+      type: 'gain',
+      amount: coinsGained,
+      balanceBefore: balBeforeRp,
+      balanceAfter: user.coins,
+      description: `Menukar ${rpUsed} RP menjadi +${coinsGained.toLocaleString('id-ID')} koin`,
+      meta: { rpUsed, coinsGained }
+    });
 
     await InboxMessage.create({
       toUsername: username,
@@ -237,8 +280,22 @@ exports.verifyPlayStorePurchase = async (req, res) => {
       });
 
       user.vipLevel = Math.max(user.vipLevel || 0, vip.level);
+      const balBeforeVipGp = user.coins;
       user.coins += vip.coinsBonus;
       await user.save();
+
+      recordCoinLog({
+        username: user.username,
+        userId: user.userId,
+        source: 'vip_bonus',
+        gameName: 'Upgrade VIP (Google Play)',
+        type: 'gain',
+        amount: vip.coinsBonus,
+        balanceBefore: balBeforeVipGp,
+        balanceAfter: user.coins,
+        description: `Bonus koin Google Play pembelian status ${vip.name}`,
+        meta: { orderId, vipId: vip.id }
+      });
 
       await InboxMessage.create({
         toUsername: username,
@@ -275,8 +332,22 @@ exports.verifyPlayStorePurchase = async (req, res) => {
       status: 'COMPLETED'
     });
 
+    const balBefore = user.coins;
     user.coins += pkg.coins;
     await user.save();
+
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'shop_topup',
+      gameName: 'Toko Koin (Top Up)',
+      type: 'gain',
+      amount: pkg.coins,
+      balanceBefore: balBefore,
+      balanceAfter: user.coins,
+      description: `Beli paket ${pkg.name} (${pkg.priceRp})`,
+      meta: { packageId: pkg.id }
+    });
 
     await InboxMessage.create({
       toUsername: username,

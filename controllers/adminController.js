@@ -1,4 +1,309 @@
+const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
+
+// Auto-load .env if not loaded yet
+try {
+  const envPath = path.join(__dirname, '../.env');
+  if (fs.existsSync(envPath)) {
+    const envLines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of envLines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const idx = trimmed.indexOf('=');
+      if (idx !== -1) {
+        const key = trimmed.substring(0, idx).trim();
+        const val = trimmed.substring(idx + 1).trim();
+        if (key && !process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  }
+} catch (e) {}
 const User = require('../models/User');
+const CoinLog = require('../models/CoinLog');
+const { recordCoinLog } = require('../helpers/coinLogger');
+
+// Rate limiting & lockout tracking: IP -> { attempts: number, lockedUntil: number }
+const loginAttempts = new Map();
+
+// Active sessions: token -> { ip: string, createdAt: number, expiresAt: number }
+const adminSessions = new Map();
+
+const MAX_ATTEMPTS = 3;
+const LOCKOUT_DURATION_MS = 60 * 60 * 1000; // 1 jam = 3,600,000 ms
+const SESSION_DURATION_MS = 24 * 60 * 60 * 1000; // 24 jam
+
+const dashboardHtmlPath = path.join(__dirname, 'adminDashboard.html');
+let cachedDashboardHtml = null;
+
+function normalizeIp(ip) {
+  if (!ip) return '127.0.0.1';
+  let clean = String(ip).trim();
+  if (clean.startsWith('::ffff:')) {
+    clean = clean.substring(7);
+  }
+  if (clean === '::1') {
+    clean = '127.0.0.1';
+  }
+  return clean;
+}
+
+function getClientIp(req) {
+  const cfIp = req.headers['cf-connecting-ip'];
+  if (cfIp) return normalizeIp(cfIp);
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) return normalizeIp(forwarded.split(',')[0]);
+  const realIp = req.headers['x-real-ip'];
+  if (realIp) return normalizeIp(realIp);
+  return normalizeIp(req.socket ? req.socket.remoteAddress : req.ip);
+}
+
+function parseCookies(req) {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return {};
+  const cookies = {};
+  cookieHeader.split(';').forEach(c => {
+    const parts = c.trim().split('=');
+    if (parts[0]) cookies[parts[0]] = decodeURIComponent(parts.slice(1).join('='));
+  });
+  return cookies;
+}
+
+function getIpLockState(ip) {
+  const now = Date.now();
+  const state = loginAttempts.get(ip);
+  if (!state) {
+    return { attempts: 0, locked: false, remainingLockSeconds: 0 };
+  }
+  if (state.lockedUntil && state.lockedUntil > now) {
+    return {
+      attempts: state.attempts || MAX_ATTEMPTS,
+      locked: true,
+      remainingLockSeconds: Math.ceil((state.lockedUntil - now) / 1000)
+    };
+  }
+  if (state.lockedUntil && state.lockedUntil <= now) {
+    loginAttempts.delete(ip);
+    return { attempts: 0, locked: false, remainingLockSeconds: 0 };
+  }
+  return {
+    attempts: state.attempts || 0,
+    locked: false,
+    remainingLockSeconds: 0
+  };
+}
+
+function formatLockDuration(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m > 0) return `${m} menit ${s} detik`;
+  return `${s} detik`;
+}
+
+// Clean up expired sessions & locks periodically (every 30 mins)
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, sess] of adminSessions.entries()) {
+    if (sess.expiresAt < now) {
+      adminSessions.delete(token);
+    }
+  }
+  for (const [ip, state] of loginAttempts.entries()) {
+    if (state.lockedUntil && state.lockedUntil < now) {
+      loginAttempts.delete(ip);
+    }
+  }
+}, 30 * 60 * 1000);
+
+// POST /api/admin/login
+exports.login = async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const lockState = getIpLockState(ip);
+
+    if (lockState.locked) {
+      return res.status(429).json({
+        success: false,
+        locked: true,
+        remainingLockSeconds: lockState.remainingLockSeconds,
+        error: `Akses ditolak! Terlalu banyak percobaan salah (3x). Silakan coba lagi dalam ${formatLockDuration(lockState.remainingLockSeconds)}.`
+      });
+    }
+
+    const { password } = req.body;
+    const adminPassword = (process.env.ADMIN_PASSWORD || '88889999').trim();
+
+    if (!password || String(password).trim() !== adminPassword) {
+      const state = loginAttempts.get(ip) || { attempts: 0 };
+      state.attempts = (state.attempts || 0) + 1;
+
+      if (state.attempts >= MAX_ATTEMPTS) {
+        state.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
+        loginAttempts.set(ip, state);
+        return res.status(429).json({
+          success: false,
+          locked: true,
+          remainingLockSeconds: 3600,
+          error: 'Password salah 3 kali! Akses ke halaman admin dikunci selama 1 jam.'
+        });
+      } else {
+        loginAttempts.set(ip, state);
+        const attemptsLeft = MAX_ATTEMPTS - state.attempts;
+        return res.status(401).json({
+          success: false,
+          locked: false,
+          attemptsLeft,
+          error: `Password salah! Sisa percobaan: ${attemptsLeft} dari ${MAX_ATTEMPTS}.`
+        });
+      }
+    }
+
+    // Password valid! Clear failed attempts
+    loginAttempts.delete(ip);
+
+    // Generate token
+    const token = crypto.randomBytes(32).toString('hex');
+    adminSessions.set(token, {
+      ip,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + SESSION_DURATION_MS
+    });
+
+    // Set cookie
+    res.setHeader('Set-Cookie', `admin_token=${token}; Path=/; SameSite=Lax; Max-Age=86400`);
+
+    return res.json({
+      success: true,
+      message: 'Login admin berhasil',
+      token
+    });
+  } catch (err) {
+    console.error('Admin login error:', err);
+    res.status(500).json({ error: 'Terjadi kesalahan sistem saat login' });
+  }
+};
+
+// GET /api/admin/auth-status
+exports.getAuthStatus = async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const lockState = getIpLockState(ip);
+
+    if (lockState.locked) {
+      return res.json({
+        authenticated: false,
+        locked: true,
+        remainingLockSeconds: lockState.remainingLockSeconds,
+        attemptsLeft: 0
+      });
+    }
+
+    // Check token from header or cookie
+    const authHeader = req.headers.authorization;
+    let token = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7).trim();
+    } else if (req.headers['x-admin-token']) {
+      token = req.headers['x-admin-token'];
+    } else {
+      const cookies = parseCookies(req);
+      if (cookies.admin_token) token = cookies.admin_token;
+    }
+
+    let authenticated = false;
+    if (token) {
+      const session = adminSessions.get(token);
+      if (session && session.expiresAt > Date.now()) {
+        authenticated = true;
+      } else if (session) {
+        adminSessions.delete(token);
+      }
+    }
+
+    const attemptsLeft = MAX_ATTEMPTS - lockState.attempts;
+
+    return res.json({
+      authenticated,
+      locked: false,
+      remainingLockSeconds: 0,
+      attemptsLeft: Math.max(0, attemptsLeft)
+    });
+  } catch (err) {
+    console.error('Admin auth status error:', err);
+    res.status(500).json({ error: 'Gagal mengecek status auth' });
+  }
+};
+
+// POST /api/admin/logout
+exports.logout = async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    let token = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7).trim();
+    } else if (req.headers['x-admin-token']) {
+      token = req.headers['x-admin-token'];
+    } else {
+      const cookies = parseCookies(req);
+      if (cookies.admin_token) token = cookies.admin_token;
+    }
+
+    if (token) {
+      adminSessions.delete(token);
+    }
+
+    res.setHeader('Set-Cookie', 'admin_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+    res.json({ success: true, message: 'Logout admin berhasil' });
+  } catch (err) {
+    console.error('Admin logout error:', err);
+    res.status(500).json({ error: 'Gagal logout' });
+  }
+};
+
+// Middleware: requireAdminAuth
+exports.requireAdminAuth = (req, res, next) => {
+  const ip = getClientIp(req);
+  const lockState = getIpLockState(ip);
+  if (lockState.locked) {
+    return res.status(429).json({
+      success: false,
+      locked: true,
+      remainingLockSeconds: lockState.remainingLockSeconds,
+      error: `Akses ditolak! Terlalu banyak percobaan salah (3x). Silakan coba lagi dalam ${formatLockDuration(lockState.remainingLockSeconds)}.`
+    });
+  }
+
+  const authHeader = req.headers.authorization;
+  let token = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else if (req.headers['x-admin-token']) {
+    token = req.headers['x-admin-token'];
+  } else {
+    const cookies = parseCookies(req);
+    if (cookies.admin_token) token = cookies.admin_token;
+  }
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      error: 'Akses ditolak: Autentikasi admin diperlukan. Silakan login terlebih dahulu.'
+    });
+  }
+
+  const session = adminSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    if (session) adminSessions.delete(token);
+    return res.status(401).json({
+      success: false,
+      error: 'Sesi admin telah kedaluwarsa atau tidak valid. Silakan login kembali.'
+    });
+  }
+
+  next();
+};
 
 // GET /api/admin/users
 exports.getUsers = async (req, res) => {
@@ -15,7 +320,7 @@ exports.getUsers = async (req, res) => {
     const skip = (p - 1) * l;
 
     const [users, total] = await Promise.all([
-      User.find(query, 'username userId avatar coins bonusCoins vipLevel role isAdmin createdAt')
+      User.find(query, 'username userId avatar coins bonusCoins vipLevel role isAdmin slotAlwaysLose createdAt')
         .sort({ coins: -1 })
         .skip(skip)
         .limit(l)
@@ -24,12 +329,14 @@ exports.getUsers = async (req, res) => {
     ]);
 
     const totalAdmins = await User.countDocuments({ $or: [{ role: 'admin' }, { isAdmin: true }] });
+    const totalSlotLocked = await User.countDocuments({ slotAlwaysLose: true });
 
     res.json({
       success: true,
       users,
       total,
       totalAdmins,
+      totalSlotLocked,
       page: p,
       totalPages: Math.ceil(total / l)
     });
@@ -76,6 +383,38 @@ exports.setRole = async (req, res) => {
   }
 };
 
+// POST /api/admin/toggle-slot-lock
+exports.toggleSlotLock = async (req, res) => {
+  try {
+    const { username, userId, slotAlwaysLose } = req.body;
+    if (!username && !userId) {
+      return res.status(400).json({ error: 'Username atau userId wajib diisi' });
+    }
+
+    const filter = username ? { username } : { userId };
+    const user = await User.findOne(filter);
+    if (!user) {
+      return res.status(404).json({ error: 'Pemain tidak ditemukan' });
+    }
+
+    user.slotAlwaysLose = typeof slotAlwaysLose === 'boolean' ? slotAlwaysLose : !user.slotAlwaysLose;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: user.slotAlwaysLose
+        ? `⚠️ AKUN ${user.username} DIKUNCI! Pemain ini TIDAK AKAN PERNAH BISA MENANG di semua game slot (RTP 0% / Selalu Rungkad).`
+        : `✅ Kunci slot akun ${user.username} DIBUKA! Permainan slot kembali normal.`,
+      slotAlwaysLose: user.slotAlwaysLose,
+      username: user.username,
+      userId: user.userId
+    });
+  } catch (err) {
+    console.error('Admin toggleSlotLock error:', err);
+    res.status(500).json({ error: 'Gagal mengubah status kunci slot' });
+  }
+};
+
 // POST /api/admin/adjust-coins
 exports.adjustCoins = async (req, res) => {
   try {
@@ -89,8 +428,26 @@ exports.adjustCoins = async (req, res) => {
       return res.status(404).json({ error: 'Pemain tidak ditemukan' });
     }
 
-    user.coins = Math.max(0, Number(coins) || 0);
+    const oldCoins = user.coins || 0;
+    const newCoins = Math.max(0, Number(coins) || 0);
+    const diff = newCoins - oldCoins;
+
+    user.coins = newCoins;
     await user.save();
+
+    if (diff !== 0) {
+      recordCoinLog({
+        username: user.username,
+        userId: user.userId,
+        source: 'admin_adjust',
+        gameName: 'Admin Panel',
+        type: diff > 0 ? 'gain' : 'spend',
+        amount: Math.abs(diff),
+        balanceBefore: oldCoins,
+        balanceAfter: user.coins,
+        description: `Admin mengatur saldo koin dari ${oldCoins.toLocaleString('id-ID')} menjadi ${newCoins.toLocaleString('id-ID')}`
+      });
+    }
 
     res.json({
       success: true,
@@ -103,434 +460,107 @@ exports.adjustCoins = async (req, res) => {
   }
 };
 
+// GET /api/admin/coin-logs
+exports.getCoinLogs = async (req, res) => {
+  try {
+    const { username, userId, source, type, page = 1, limit = 50 } = req.query;
+    const query = {};
+    if (username && username.trim()) query.username = username.trim();
+    if (userId && userId.trim()) query.userId = userId.trim();
+    if (source && source.trim()) query.source = source.trim();
+    if (type && type.trim()) query.type = type.trim();
+
+    const p = Math.max(1, parseInt(page) || 1);
+    const l = Math.min(200, Math.max(1, parseInt(limit) || 50));
+    const skip = (p - 1) * l;
+
+    const [logs, total] = await Promise.all([
+      CoinLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(l)
+        .lean(),
+      CoinLog.countDocuments(query)
+    ]);
+
+    // Aggregate source breakdown (dari game/sumber mana saja koin diperoleh)
+    const breakdownMatch = {};
+    if (query.username) breakdownMatch.username = query.username;
+    if (query.userId) breakdownMatch.userId = query.userId;
+
+    const [breakdownByGame, totals] = await Promise.all([
+      CoinLog.aggregate([
+        { $match: breakdownMatch },
+        {
+          $group: {
+            _id: '$gameName',
+            source: { $first: '$source' },
+            totalGained: {
+              $sum: { $cond: [{ $eq: ['$type', 'gain'] }, '$amount', 0] }
+            },
+            totalSpent: {
+              $sum: { $cond: [{ $eq: ['$type', 'spend'] }, '$amount', 0] }
+            },
+            winCount: {
+              $sum: { $cond: [{ $eq: ['$type', 'gain'] }, 1, 0] }
+            },
+            loseCount: {
+              $sum: { $cond: [{ $eq: ['$type', 'spend'] }, 1, 0] }
+            },
+            count: { $sum: 1 },
+            latestAt: { $max: '$createdAt' }
+          }
+        },
+        { $sort: { totalGained: -1, totalSpent: -1 } }
+      ]),
+      CoinLog.aggregate([
+        { $match: breakdownMatch },
+        {
+          $group: {
+            _id: '$type',
+            total: { $sum: '$amount' },
+            count: { $sum: 1 }
+          }
+        }
+      ])
+    ]);
+
+    let totalGained = 0;
+    let totalSpent = 0;
+    totals.forEach(t => {
+      if (t._id === 'gain') totalGained = t.total;
+      if (t._id === 'spend') totalSpent = t.total;
+    });
+
+    res.json({
+      success: true,
+      logs,
+      total,
+      page: p,
+      totalPages: Math.ceil(total / l),
+      stats: {
+        totalGained,
+        totalSpent,
+        netChange: totalGained - totalSpent,
+        breakdownByGame
+      }
+    });
+  } catch (err) {
+    console.error('Admin getCoinLogs error:', err);
+    res.status(500).json({ error: 'Gagal mengambil data log koin' });
+  }
+};
+
 // GET /admin - Interactive HTML Dashboard
 exports.renderDashboard = async (req, res) => {
-  const html = `<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin Dashboard — Kings Domino & Billiard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg: #0b0f19;
-      --card-bg: rgba(20, 27, 45, 0.75);
-      --border: rgba(255, 215, 0, 0.25);
-      --gold: #ffd700;
-      --gold-dark: #b8860b;
-      --green: #10b981;
-      --red: #ef4444;
-      --text: #f8fafc;
-      --text-dim: #94a3b8;
+  try {
+    if (!cachedDashboardHtml || process.env.NODE_ENV !== 'production') {
+      cachedDashboardHtml = fs.readFileSync(dashboardHtmlPath, 'utf8');
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Outfit', sans-serif;
-      background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, var(--bg) 70%);
-      color: var(--text);
-      min-height: 100vh;
-      padding: 24px;
-    }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 24px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      flex-wrap: wrap;
-      gap: 16px;
-    }
-    .header h1 {
-      font-size: 26px;
-      font-weight: 900;
-      background: linear-gradient(135deg, #fff, var(--gold));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-    .stat-card {
-      background: var(--card-bg);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px 20px;
-      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
-    }
-    .stat-label {
-      font-size: 13px;
-      color: var(--text-dim);
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .stat-val {
-      font-size: 28px;
-      font-weight: 900;
-      color: var(--gold);
-      margin-top: 6px;
-    }
-    .controls {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 20px;
-      flex-wrap: wrap;
-    }
-    .search-input {
-      flex: 1;
-      min-width: 260px;
-      padding: 12px 18px;
-      background: rgba(15, 23, 42, 0.8);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: #fff;
-      font-size: 15px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    .search-input:focus {
-      border-color: var(--gold);
-    }
-    .btn {
-      padding: 10px 18px;
-      border-radius: 10px;
-      font-weight: 700;
-      font-size: 14px;
-      cursor: pointer;
-      border: none;
-      transition: transform 0.1s, filter 0.2s;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .btn:active { transform: scale(0.96); }
-    .btn-gold {
-      background: linear-gradient(135deg, #ffd700, #ff8f00);
-      color: #000;
-    }
-    .btn-admin {
-      background: linear-gradient(135deg, #10b981, #059669);
-      color: #fff;
-    }
-    .btn-revoke {
-      background: linear-gradient(135deg, #ef4444, #b91c1c);
-      color: #fff;
-    }
-    .btn-coin {
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      color: #fff;
-    }
-    .btn-coin:hover { background: rgba(255, 255, 255, 0.2); }
-    .table-card {
-      background: var(--card-bg);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      overflow-x: auto;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-    }
-    th {
-      background: rgba(15, 23, 42, 0.7);
-      padding: 14px 18px;
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--text-dim);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    td {
-      padding: 14px 18px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-      font-size: 14px;
-      vertical-align: middle;
-    }
-    tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
-    }
-    .user-cell {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .user-avatar {
-      width: 40px;
-      height: 40px;
-      min-width: 40px;
-      border-radius: 50%;
-      background: #111;
-      border: 2px solid var(--gold);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      object-fit: cover;
-      overflow: hidden;
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 10px;
-      border-radius: 20px;
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: 0.02em;
-    }
-    .badge-admin {
-      background: rgba(16, 185, 129, 0.2);
-      color: #34d399;
-      border: 1px solid #10b981;
-    }
-    .badge-user {
-      background: rgba(148, 163, 184, 0.15);
-      color: #cbd5e1;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-    }
-    .badge-hidden {
-      font-size: 10px;
-      color: #fbbf24;
-      background: rgba(245, 158, 11, 0.15);
-      padding: 2px 6px;
-      border-radius: 6px;
-      margin-left: 6px;
-    }
-    .toast {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      background: #1e293b;
-      border: 1px solid var(--gold);
-      color: #fff;
-      padding: 14px 20px;
-      border-radius: 10px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-      z-index: 100;
-      display: none;
-      animation: slideIn 0.3s ease;
-      font-weight: 600;
-    }
-    @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>👑 Kings Domino & Slot — Admin Dashboard</h1>
-    <div>
-      <span style="color: var(--text-dim); font-size: 14px;">Kelola Role Admin & Pengecualian Leaderboard</span>
-    </div>
-  </div>
-
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-label">Total Akun Admin</div>
-      <div class="stat-val" id="statAdmins">0</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Total Pemain Terdaftar</div>
-      <div class="stat-val" id="statTotal">0</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Aturan Leaderboard</div>
-      <div class="stat-val" style="font-size: 16px; color: #34d399; margin-top: 10px;">
-        🛡️ Akun Admin 100% Otomatis Disembunyikan
-      </div>
-    </div>
-  </div>
-
-  <div class="controls">
-    <input type="text" id="searchInput" class="search-input" placeholder="🔍 Cari username atau 8-digit Player ID..." onkeyup="handleSearch(event)">
-    <button class="btn btn-gold" onclick="loadUsers()">🔄 Segarkan Data</button>
-  </div>
-
-  <div class="table-card">
-    <table>
-      <thead>
-        <tr>
-          <th>Pemain</th>
-          <th>ID Pemain</th>
-          <th>Status Role</th>
-          <th>Saldo Koin</th>
-          <th>VIP</th>
-          <th style="text-align: right;">Aksi Role & Koin</th>
-        </tr>
-      </thead>
-      <tbody id="userTableBody">
-        <tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 40px;">Memuat data pemain...</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div id="toast" class="toast"></div>
-
-  <script>
-    let searchTimeout;
-
-    function showToast(msg) {
-      const t = document.getElementById('toast');
-      t.innerText = msg;
-      t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 3500);
-    }
-
-    function handleAvatarError(img) {
-      if (!img) return;
-      var span = document.createElement('span');
-      span.innerText = '👤';
-      span.className = 'user-avatar';
-      if (img.parentNode) {
-        img.parentNode.replaceChild(span, img);
-      }
-    }
-
-    function renderAvatar(avatar) {
-      if (!avatar) return '<div class="user-avatar">🐸</div>';
-      var str = String(avatar).trim();
-      if (str.startsWith('data:image/') || str.startsWith('http://') || str.startsWith('https://')) {
-        return '<img src="' + str + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
-      }
-      if (str.length > 50) {
-        var src = str.startsWith('data:') ? str : ('data:image/jpeg;base64,' + str);
-        return '<img src="' + src + '" class="user-avatar" style="object-fit:cover;" onerror="handleAvatarError(this)" />';
-      }
-      return '<div class="user-avatar">' + str + '</div>';
-    }
-
-    async function loadUsers(query = '') {
-      const tbody = document.getElementById('userTableBody');
-      try {
-        const res = await fetch('/api/admin/users?q=' + encodeURIComponent(query));
-        const data = await res.json();
-        if (!data.success) {
-          if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #ef4444; padding: 40px;">Gagal memuat data: ' + (data.error || 'Server error') + '</td></tr>';
-          return;
-        }
-
-        document.getElementById('statTotal').innerText = Number(data.total || 0).toLocaleString('id-ID');
-        document.getElementById('statAdmins').innerText = Number(data.totalAdmins || 0).toLocaleString('id-ID');
-
-        if (!data.users || data.users.length === 0) {
-          if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding: 40px;">Tidak ada pemain ditemukan.</td></tr>';
-          return;
-        }
-
-        tbody.innerHTML = data.users.map(u => {
-          const isAdmin = u.role === 'admin' || u.isAdmin;
-          return \`
-            <tr>
-              <td>
-                <div class="user-cell">
-                  \${renderAvatar(u.avatar)}
-                  <div>
-                    <div style="font-weight: 700; color: #fff;">\${u.username}</div>
-                  </div>
-                </div>
-              </td>
-              <td style="font-family: monospace; color: var(--gold); font-weight: 700;">\${u.userId || '-'}</td>
-              <td>
-                \${isAdmin 
-                  ? '<span class="badge badge-admin">⭐ ADMIN</span><span class="badge-hidden">🚫 Tidak Masuk Leaderboard</span>' 
-                  : '<span class="badge badge-user">USER</span>'}
-              </td>
-              <td style="font-weight: 800; color: #ffd700;">🪙 \${(u.coins || 0).toLocaleString('id-ID')}</td>
-              <td><span style="color: #ffd54f; font-weight: 700;">VIP \${u.vipLevel || 0}</span></td>
-              <td style="text-align: right;">
-                <div style="display: inline-flex; gap: 8px;">
-                  \${isAdmin ? \`
-                    <button class="btn btn-revoke" onclick="toggleRole('\${u.username}', 'user')">❌ Cabut Admin</button>
-                  \` : \`
-                    <button class="btn btn-admin" onclick="toggleRole('\${u.username}', 'admin')">⭐ Jadikan Admin</button>
-                  \`}
-                  <button class="btn btn-coin" onclick="editCoins('\${u.username}', \${u.coins || 0})">✏️ Ubah Koin</button>
-                </div>
-              </td>
-            </tr>
-          \`;
-        }).join('');
-      } catch (err) {
-        console.error('loadUsers error:', err);
-        if (tbody) {
-          tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #ef4444; padding: 40px;">Terjadi kesalahan saat memuat data: ' + err.message + '</td></tr>';
-        }
-      }
-    }
-
-    async function toggleRole(username, newRole) {
-      const actionText = newRole === 'admin' ? 'menjadi ADMIN (disembunyikan dari leaderboard)?' : 'menjadi USER biasa (akan muncul di leaderboard jika koin tinggi)?';
-      if (!confirm('Apakah Anda yakin ingin mengubah akun ' + username + ' ' + actionText)) return;
-
-      try {
-        const res = await fetch('/api/admin/set-role', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, role: newRole })
-        });
-        const d = await res.json();
-        if (d.success) {
-          showToast(d.message);
-          loadUsers(document.getElementById('searchInput').value);
-        } else {
-          alert(d.error || 'Gagal mengubah role');
-        }
-      } catch (e) {
-        alert('Gagal menghubungi server');
-      }
-    }
-
-    async function editCoins(username, current) {
-      const input = prompt('Masukkan jumlah saldo Koin baru untuk ' + username + ':', current);
-      if (input === null) return;
-      const num = parseInt(input.replace(/[^0-9]/g, ''), 10);
-      if (isNaN(num)) {
-        alert('Jumlah koin harus berupa angka!');
-        return;
-      }
-      try {
-        const res = await fetch('/api/admin/adjust-coins', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, coins: num })
-        });
-        const d = await res.json();
-        if (d.success) {
-          showToast(d.message);
-          loadUsers(document.getElementById('searchInput').value);
-        } else {
-          alert(d.error || 'Gagal mengubah koin');
-        }
-      } catch (e) {
-        alert('Gagal menghubungi server');
-      }
-    }
-
-    function handleSearch(e) {
-      clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => {
-        loadUsers(e.target.value);
-      }, 300);
-    }
-
-    window.onload = () => loadUsers();
-  </script>
-</body>
-</html>`;
-
-  res.setHeader('Content-Type', 'text/html');
-  res.send(html);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(cachedDashboardHtml);
+  } catch (err) {
+    console.error('Error rendering admin dashboard:', err);
+    res.status(500).send('Gagal memuat dashboard admin');
+  }
 };

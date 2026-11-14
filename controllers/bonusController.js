@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const InboxMessage = require('../models/InboxMessage');
+const { recordCoinLog } = require('../helpers/coinLogger');
 
 // Simple daily reward: 5000 coins every day
 const DAILY_REWARD_COINS = 5000;
@@ -71,6 +72,18 @@ exports.claimDailyBonus = async (req, res) => {
     user.bonusCoinsExpireAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
     await user.save();
+
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'daily_bonus',
+      gameName: 'Bonus Harian',
+      type: 'gain',
+      amount: coins,
+      balanceBefore: user.coins,
+      balanceAfter: user.coins,
+      description: `Klaim bonus harian +${coins.toLocaleString('id-ID')} bonus koin slot`
+    });
 
     // Inbox notification
     await InboxMessage.create({

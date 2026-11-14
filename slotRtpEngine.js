@@ -17,7 +17,18 @@ const SCATTER_ANTE_RATE = 0.0040;   // ~1 in 250 spins with 1.25x Ante Bet
 /**
  * Calculates whether a spin is a hit, a scatter trigger, and what target payout tier it belongs to.
  */
-function determineSpinOutcome({ isFreeSpins = false, anteMode = false, buyFeature = false } = {}) {
+function determineSpinOutcome({ isFreeSpins = false, anteMode = false, buyFeature = false, alwaysLose = false } = {}) {
+  // 0. Forced Loss (Admin Kunci Kalah Slot - 100% zonk, 0 scatter, 0 win)
+  if (alwaysLose) {
+    return {
+      isHit: false,
+      isScatter: false,
+      targetMult: 0,
+      winTier: 'loss',
+      scattersCount: 0
+    };
+  }
+
   // 1. Buy Free Spins Feature: hanya menjatuhkan 4 Scatter pemicu tanpa kemenangan cluster tambahan
   if (buyFeature) {
     return {

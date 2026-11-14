@@ -2,6 +2,7 @@ const User = require('../models/User');
 const InboxMessage = require('../models/InboxMessage');
 const TransferHistory = require('../models/TransferHistory');
 const { checkAndCleanExpiredBonus, spendUserCoins } = require('../helpers/bonusHelper');
+const { recordCoinLog } = require('../helpers/coinLogger');
 
 function isSameDay(d1, d2) {
   if (!d1 || !d2) return false;
@@ -558,6 +559,8 @@ exports.updateCoins = async (req, res) => {
     // Check expiration first
     await checkAndCleanExpiredBonus(user);
 
+    const balBeforeUpdate = user.coins || 0;
+
     // Apply change
     if (updateAmount < 0) {
       const deduct = Math.abs(updateAmount);
@@ -583,10 +586,39 @@ exports.updateCoins = async (req, res) => {
         }
         spendUserCoins(user, deduct);
       }
+      await user.save();
+
+      recordCoinLog({
+        username: user.username,
+        userId: user.userId,
+        source: gameType || 'game',
+        gameName: gameType ? String(gameType).toUpperCase() : 'Game Lainnya',
+        type: 'spend',
+        amount: deduct,
+        balanceBefore: balBeforeUpdate,
+        balanceAfter: user.coins,
+        description: `Kalah / Taruhan koin ${gameType || 'game'} (-${deduct.toLocaleString('id-ID')} koin)`,
+        meta: { gameType }
+      });
     } else {
       user.coins = Math.max(0, user.coins + updateAmount);
+      await user.save();
+
+      if (updateAmount > 0) {
+        recordCoinLog({
+          username: user.username,
+          userId: user.userId,
+          source: gameType || 'game',
+          gameName: gameType ? String(gameType).toUpperCase() : 'Game Lainnya',
+          type: 'gain',
+          amount: updateAmount,
+          balanceBefore: balBeforeUpdate,
+          balanceAfter: user.coins,
+          description: `Menang koin ${gameType || 'game'} (+${updateAmount.toLocaleString('id-ID')} koin)`,
+          meta: { gameType }
+        });
+      }
     }
-    await user.save();
 
     res.json({
       message: 'Koin berhasil diperbarui',
