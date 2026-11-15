@@ -114,6 +114,19 @@ exports.buyAvatar = async (req, res) => {
 
     await user.save();
 
+    recordCoinLog({
+      username: user.username,
+      userId: user.userId,
+      source: 'shop_avatar',
+      gameName: 'Beli Avatar Toko',
+      type: 'spend',
+      amount: item.priceCoins,
+      balanceBefore: user.coins + item.priceCoins,
+      balanceAfter: user.coins,
+      description: `Beli avatar ${item.name} (${item.emoji})`,
+      meta: { avatarId: item.id }
+    });
+
     await InboxMessage.create({
       toUsername: username,
       fromUsername: 'TOKO',

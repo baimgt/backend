@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
@@ -145,6 +145,7 @@ app.get('/api/admin/users',                        adminController.requireAdminA
 app.post('/api/admin/set-role',                    adminController.requireAdminAuth, adminController.setRole);
 app.post('/api/admin/adjust-coins',                adminController.requireAdminAuth, adminController.adjustCoins);
 app.post('/api/admin/toggle-slot-lock',            adminController.requireAdminAuth, adminController.toggleSlotLock);
+app.post('/api/admin/delete-user',                 adminController.requireAdminAuth, adminController.deleteUser);
 app.get('/api/admin/coin-logs',                    adminController.requireAdminAuth, adminController.getCoinLogs);
 
 // Initialize Socket.IO game events

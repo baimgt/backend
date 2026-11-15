@@ -54,6 +54,18 @@ exports.getProfile = async (req, res) => {
       });
       await user.save();
       console.log(`[USER AUTO-CREATED ON GET PROFILE] ${cleanUser} | ID: ${user.userId}`);
+      if (user.coins > 0) {
+        await recordCoinLog({
+          username: user.username,
+          userId: user.userId,
+          type: 'gain',
+          amount: user.coins,
+          source: 'initial_balance',
+          gameName: 'Saldo Awal Tamu',
+          balanceAfter: user.coins,
+          description: 'Saldo awal pendaftaran tamu'
+        });
+      }
     }
 
     if (!user) {
@@ -196,9 +208,25 @@ exports.createUser = async (req, res) => {
     if (payload.nameChangeCount === undefined) {
       payload.nameChangeCount = 0; // Pengguna baru mendapatkan 1x ganti nama gratis
     }
+    // Pastikan koin awal akun baru adalah 10.000
+    if (payload.coins === undefined || payload.coins > 10000) {
+      payload.coins = 10000;
+    }
 
     const newUser = new User(payload);
     await newUser.save();
+    if (newUser.coins > 0) {
+      await recordCoinLog({
+        username: newUser.username,
+        userId: newUser.userId,
+        type: 'gain',
+        amount: newUser.coins,
+        source: 'initial_balance',
+        gameName: 'Saldo Awal Akun',
+        balanceAfter: newUser.coins,
+        description: 'Saldo awal pembuatan akun'
+      });
+    }
     res.status(201).json({ message: 'Pemain berhasil dibuat!', user: newUser, userId: newUser.userId });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -498,6 +526,9 @@ exports.transferCoins = async (req, res) => {
     sender.lastSentDate = now;
 
     // Deduct and add
+    const senderBefore = sender.coins;
+    const receiverBefore = receiver.coins;
+
     sender.coins -= transferAmount;
     receiver.coins += transferAmount;
 
@@ -517,6 +548,34 @@ exports.transferCoins = async (req, res) => {
       status: 'success',
       note: req.body.note || 'Transfer Koin VIP'
     }).catch(err => console.error('Gagal mencatat riwayat transfer:', err));
+
+    // Audit Log Koin untuk Pengirim (Spend / Koin Keluar)
+    recordCoinLog({
+      username: sender.username,
+      userId: sender.userId,
+      source: 'transfer_out',
+      gameName: 'Kirim Koin (Transfer)',
+      type: 'spend',
+      amount: transferAmount,
+      balanceBefore: senderBefore,
+      balanceAfter: sender.coins,
+      description: `Kirim koin ke ${actualToUsername} (${req.body.note || 'Transfer Koin'})`,
+      meta: { toUsername: actualToUsername, transactionId: trxId }
+    });
+
+    // Audit Log Koin untuk Penerima (Gain / Koin Masuk)
+    recordCoinLog({
+      username: receiver.username,
+      userId: receiver.userId,
+      source: 'transfer_in',
+      gameName: 'Terima Koin (Transfer)',
+      type: 'gain',
+      amount: transferAmount,
+      balanceBefore: receiverBefore,
+      balanceAfter: receiver.coins,
+      description: `Terima koin dari ${sender.username} (${req.body.note || 'Transfer Koin'})`,
+      meta: { fromUsername: sender.username, transactionId: trxId }
+    });
 
     // Inbox notification for receiver
     await InboxMessage.create({
@@ -733,12 +792,24 @@ exports.changeUsername = async (req, res) => {
       user = new User({
         username: trimmedNew,
         userId: newUserId,
-        coins: 100000,
+        coins: 10000,
         vipLevel: 0,
         nameChangeCount: 1 // 1x ganti nama pertama sudah terpakai
       });
       await user.save();
       console.log(`[USER AUTO-REGISTERED ON NAME CHANGE] ${trimmedNew} | ID: ${user.userId}`);
+      if (user.coins > 0) {
+        await recordCoinLog({
+          username: user.username,
+          userId: user.userId,
+          type: 'gain',
+          amount: user.coins,
+          source: 'initial_balance',
+          gameName: 'Saldo Awal Akun',
+          balanceAfter: user.coins,
+          description: 'Saldo awal pendaftaran akun'
+        });
+      }
       return res.json({
         message: `Selamat! Nama akun Anda berhasil diubah menjadi "${trimmedNew}"!`,
         newUsername: trimmedNew,
@@ -788,6 +859,20 @@ exports.changeUsername = async (req, res) => {
     await user.save();
 
     console.log(`[USERNAME CHANGED] ${oldUsername} -> ${trimmedNew} | Count: ${user.nameChangeCount} | Cost: ${isFree ? 'FREE (0)' : COST}`);
+
+    if (!isFree) {
+      recordCoinLog({
+        username: trimmedNew,
+        userId: user.userId,
+        source: 'name_change',
+        gameName: 'Biaya Ganti Nama',
+        type: 'spend',
+        amount: COST,
+        balanceBefore: user.coins + COST,
+        balanceAfter: user.coins,
+        description: `Biaya ganti nama akun dari "${oldUsername}" menjadi "${trimmedNew}"`
+      });
+    }
 
     // Sinkronkan relasi pertemanan, pesan inbox, dan riwayat transfer
     try {
@@ -1050,19 +1135,34 @@ exports.googleLogin = async (req, res) => {
 
     const newUserId = await generateUniqueUserId();
     const initialAvatar = googleAvatar || '🐸';
+    const isAuthenticGoogle = Boolean(cleanGoogleId || cleanEmail);
+    const initialCoins = 10000; // Login Guest dan Google koin awal pendaftaran adalah 10.000
     const newUser = new User({
       username: targetUsername,
       userId: newUserId,
-      coins: 100000,
+      coins: initialCoins,
       rp: 0,
       score: 50,
       avatar: initialAvatar,
-      authProvider: 'google',
+      authProvider: isAuthenticGoogle ? 'google' : 'guest',
       googleId: cleanGoogleId || null,
       googleEmail: cleanEmail || null,
       nameChangeCount: 0
     });
     await newUser.save();
+
+    if (newUser.coins > 0) {
+      await recordCoinLog({
+        username: newUser.username,
+        userId: newUser.userId,
+        type: 'gain',
+        amount: newUser.coins,
+        source: isAuthenticGoogle ? 'google_register_bonus' : 'initial_balance',
+        gameName: isAuthenticGoogle ? 'Bonus Akun Google (10K)' : 'Saldo Awal Akun (10K)',
+        balanceAfter: newUser.coins,
+        description: isAuthenticGoogle ? 'Bonus pendaftaran akun Google (10.000)' : 'Saldo awal akun baru (10.000)'
+      });
+    }
 
     res.status(201).json({
       message: 'Akun Google berhasil didaftarkan!',

@@ -1136,6 +1136,15 @@
                     style="font-size: 11px;">
                     ${isAdmin ? 'Demote ke User' : '⭐ Jadikan Admin'}
                   </button>
+
+                  <!-- TOMBOL HAPUS AKUN -->
+                  <button 
+                    onclick="promptDeleteUser('${u.username}', '${u.userId || ''}')" 
+                    class="btn btn-red" 
+                    style="font-size: 11px; background: rgba(239, 68, 68, 0.25); border: 1px solid rgba(239, 68, 68, 0.7); color: #fca5a5;"
+                    title="Hapus akun pemain ini secara permanen dari database">
+                    🗑️ Hapus
+                  </button>
                 </div>
               </td>
             </tr>
@@ -1216,6 +1225,29 @@
           loadUsers(document.getElementById('searchInput').value);
         } else {
           alert('Gagal: ' + (d.error || 'Server error'));
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') alert('Kesalahan jaringan: ' + err.message);
+      }
+    }
+
+    async function promptDeleteUser(username, userId) {
+      const display = username + (userId ? ` (ID: ${userId})` : '');
+      const confirmMsg = `⚠️ PERINGATAN HAPUS AKUN PERMANEN!\n\nApakah Anda yakin ingin menghapus akun "${display}"?\n\nSemua data akun (saldo koin, teman, pesan inbox, dan riwayat log) akan dihapus secara permanen dari database dan TIDAK BISA DIKEMBALIKAN.\n\nKlik OK jika Anda yakin ingin menghapus akun ini.`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await adminFetch('/api/admin/delete-user', {
+          method: 'POST',
+          body: JSON.stringify({ username })
+        });
+        const d = await res.json();
+        if (d.success) {
+          showToast(d.message);
+          loadUsers(document.getElementById('searchInput').value);
+        } else {
+          alert('Gagal menghapus akun: ' + (d.error || 'Server error'));
         }
       } catch (err) {
         if (err.message !== 'Unauthorized') alert('Kesalahan jaringan: ' + err.message);

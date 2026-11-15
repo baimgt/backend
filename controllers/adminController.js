@@ -23,6 +23,7 @@ try {
 } catch (e) {}
 const User = require('../models/User');
 const CoinLog = require('../models/CoinLog');
+const InboxMessage = require('../models/InboxMessage');
 const { recordCoinLog } = require('../helpers/coinLogger');
 
 // Rate limiting & lockout tracking: IP -> { attempts: number, lockedUntil: number }
@@ -549,6 +550,42 @@ exports.getCoinLogs = async (req, res) => {
   } catch (err) {
     console.error('Admin getCoinLogs error:', err);
     res.status(500).json({ error: 'Gagal mengambil data log koin' });
+  }
+};
+
+// POST /api/admin/delete-user
+exports.deleteUser = async (req, res) => {
+  try {
+    const { username, userId } = req.body;
+    if (!username && !userId) {
+      return res.status(400).json({ error: 'Username atau userId wajib diisi' });
+    }
+
+    const filter = username ? { username } : { userId };
+    const user = await User.findOne(filter);
+    if (!user) {
+      return res.status(404).json({ error: 'Pemain tidak ditemukan' });
+    }
+
+    const targetUsername = user.username;
+    const targetUserId = user.userId || '-';
+
+    // Bersihkan user dan semua data terkait
+    await Promise.all([
+      User.deleteOne({ _id: user._id }),
+      User.updateMany({ friends: targetUsername }, { $pull: { friends: targetUsername } }),
+      User.updateMany({ friendRequests: targetUsername }, { $pull: { friendRequests: targetUsername } }),
+      InboxMessage.deleteMany({ $or: [{ toUsername: targetUsername }, { fromUsername: targetUsername }] }),
+      CoinLog.deleteMany({ username: targetUsername })
+    ]);
+
+    res.json({
+      success: true,
+      message: `Akun "${targetUsername}" (ID: ${targetUserId}) berhasil dihapus permanen beserta semua datanya.`
+    });
+  } catch (err) {
+    console.error('Admin deleteUser error:', err);
+    res.status(500).json({ error: 'Gagal menghapus akun: ' + err.message });
   }
 };
 
