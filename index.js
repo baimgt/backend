@@ -107,10 +107,10 @@ app.post('/api/friends/add', userController.sendFriendRequest);
 app.post('/api/friends/accept', userController.acceptFriendRequest);
 app.post('/api/friends/decline', userController.declineFriendRequest);
 app.post('/api/friends/remove', userController.removeFriend);
-app.post('/api/transfer', userController.transferCoins);
-app.post('/api/users/transfer', userController.transferCoins);
+app.post('/api/transfer', systemController.requireClientVersion, userController.transferCoins);
+app.post('/api/users/transfer', systemController.requireClientVersion, userController.transferCoins);
 app.get('/api/transfers/:username', transferController.getTransferHistory);
-app.post('/api/users/update-coins', userController.updateCoins);
+app.post('/api/users/update-coins', systemController.requireClientVersion, userController.updateCoins);
 app.post('/api/users/avatar', userController.updateAvatar);
 app.post('/api/users/change-username', userController.changeUsername);
 app.post('/api/users/link-google', userController.linkGoogleAccount);
@@ -127,14 +127,14 @@ app.post('/api/inbox/seed-welcome/:username', inboxController.seedWelcome);
 
 // Daily Bonus routes
 app.get('/api/bonus/status/:username',    bonusController.getDailyBonusStatus);
-app.post('/api/bonus/claim',              bonusController.claimDailyBonus);
+app.post('/api/bonus/claim',              systemController.requireClientVersion, bonusController.claimDailyBonus);
 
 // Shop routes
 app.get('/api/shop/catalog',                      shopController.getCatalog);
-app.post('/api/shop/buy-coins',                   shopController.buyCoins);
-app.post('/api/shop/buy-avatar',                  shopController.buyAvatar);
-app.post('/api/shop/buy-vip',                     shopController.buyVip);
-app.post('/api/shop/convert-rp',                  shopController.convertRp);
+app.post('/api/shop/buy-coins',                   systemController.requireClientVersion, shopController.buyCoins);
+app.post('/api/shop/buy-avatar',                  systemController.requireClientVersion, shopController.buyAvatar);
+app.post('/api/shop/buy-vip',                     systemController.requireClientVersion, shopController.buyVip);
+app.post('/api/shop/convert-rp',                  systemController.requireClientVersion, shopController.convertRp);
 app.post('/api/shop/verify-playstore-purchase',    shopController.verifyPlayStorePurchase);
 
 // Admin & Dashboard routes

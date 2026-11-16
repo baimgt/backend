@@ -5,6 +5,7 @@ const User = require('./models/User');
 const { spendUserCoins, spendSlotCoins, checkAndCleanExpiredBonus } = require('./helpers/bonusHelper');
 const { TARGET_RTP, TARGET_HIT_FREQ, determineSpinOutcome, sanitizeClusterGrid } = require('./slotRtpEngine');
 const { recordCoinLog } = require('./helpers/coinLogger');
+const { assertClientVersion, checkSocketIsOutdated } = require('./controllers/systemController');
 
 // Active waiting rooms: Map<roomKey, WaitingRoom>
 const waitingRooms = new Map();
@@ -1077,15 +1078,38 @@ const byoneRooms = new Map();
 // =====================================================
 function initSocketIO(io) {
   io.on('connection', (socket) => {
-    console.log('Player connected:', socket.id);
+    // Capture version & platform from handshake auth or query
+    const hAuth = socket.handshake?.auth || {};
+    const hQuery = socket.handshake?.query || {};
+    socket.clientVersion = hAuth.clientVersion || hQuery.clientVersion || null;
+    socket.platform = hAuth.platform || hQuery.platform || (socket.handshake?.headers?.origin?.includes('localhost') ? 'android' : 'web');
+
+    console.log('Player connected:', socket.id, 'Ver:', socket.clientVersion || 'legacy', 'Platform:', socket.platform);
 
     // Register active user socket
-    socket.on('register-user', ({ username }) => {
+    socket.on('register-user', ({ username, clientVersion, platform }) => {
+      if (clientVersion) socket.clientVersion = clientVersion;
+      if (platform) socket.platform = platform;
+
       if (username) {
         socket.username = username;
         userSockets.set(username, socket.id);
         // Broadcast updated online list to all connected clients
         io.emit('online-users-update', { onlineUsers: Array.from(userSockets.keys()) });
+
+        // If client version is outdated, push alert / system:version_update event
+        checkSocketIsOutdated(socket).then(check => {
+          if (check.outdated) {
+            socket.emit('system:version_update', {
+              forceUpdateApp: true,
+              forceUpdateWeb: true,
+              minAppVersion: check.minVersion,
+              minWebVersion: check.minVersion,
+              downloadUrl: check.downloadUrl,
+              updateMessage: check.message
+            });
+          }
+        }).catch(() => {});
       }
     });
 
@@ -1229,6 +1253,7 @@ function initSocketIO(io) {
 
     // Join a waiting room
     socket.on('join-room', async ({ roomConfig, username }) => {
+      if (!(await assertClientVersion(socket, 'error-msg'))) return;
       const roomKey = roomConfig.id;
 
       // Reconnect ONLY if player is in an active ongoing game they didn't leave
@@ -1425,6 +1450,7 @@ function initSocketIO(io) {
 
     socket.on('spin_slot', async ({ username, betAmount }) => {
       try {
+        if (!(await assertClientVersion(socket, 'spin_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           socket.emit('spin_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -1654,6 +1680,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_zeus', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, freeSpinMult, clientBalance, buyFeature }) => {
       try {
+        if (!(await assertClientVersion(socket, 'zeus_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           socket.emit('zeus_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -2037,6 +2064,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_fafafa', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'fafafa_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           return socket.emit('fafafa_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -2350,6 +2378,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_fivelions', async ({ username, betAmount, actualBet, anteBet, isFreeSpins, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'fivelions_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           return socket.emit('fivelions_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -2508,6 +2537,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_jinji', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'jinji_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           return socket.emit('jinji_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -2794,6 +2824,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_mahjong', async ({ username, betAmount, isFreeSpins, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'mahjong_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) {
           return socket.emit('mahjong_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
@@ -3122,6 +3153,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_wildwest', async ({ username, betAmount, isFreeSpins, stickyWilds = [], clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'wildwest_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('wildwest_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
@@ -3424,6 +3456,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_candy', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'candy_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('candy_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
@@ -3732,6 +3765,7 @@ function initSocketIO(io) {
 
     socket.on('byone_create_custom_room', async ({ username, mode, betAmount }) => {
       try {
+        if (!(await assertClientVersion(socket, 'byone_room_error'))) return;
         const rawBet = parseInt(betAmount, 10);
         const bet = Number.isFinite(rawBet) ? Math.min(500000, Math.max(5000, rawBet)) : 20000;
         const user = await User.findOne({ username });
@@ -3785,6 +3819,7 @@ function initSocketIO(io) {
 
     socket.on('byone_join_custom_room', async ({ username, code }) => {
       try {
+        if (!(await assertClientVersion(socket, 'byone_room_error'))) return;
         const cleanCode = String(code || '').replace(/[^0-9a-zA-Z]/g, '').trim();
         const roomData = byoneRooms.get(cleanCode);
         if (!roomData) {
@@ -3948,7 +3983,8 @@ function initSocketIO(io) {
     });
 
     // Billiard Real-time Shot Synchronization
-    socket.on('billiard_join_room', ({ roomCode }) => {
+    socket.on('billiard_join_room', async ({ roomCode }) => {
+      if (!(await assertClientVersion(socket, 'error-msg'))) return;
       if (roomCode) socket.join(`billiard_room_${roomCode}`);
     });
 
@@ -3960,6 +3996,7 @@ function initSocketIO(io) {
 
     socket.on('join_byone_queue', async ({ username, tierId, betAmount, mode, customCode }) => {
       try {
+        if (!(await assertClientVersion(socket, 'error-msg'))) return;
         const bet = parseInt(betAmount, 10) || 50000;
         const user = await User.findOne({ username });
         const regularCoins = user ? (user.coins || 0) : 0;
@@ -4343,6 +4380,7 @@ function initSocketIO(io) {
     // =====================================================
     socket.on('spin_gatokaca', async ({ username, betAmount, actualBet, isFreeSpins, anteMode, clientBalance }) => {
       try {
+        if (!(await assertClientVersion(socket, 'gatokaca_error'))) return;
         const bet = Number(betAmount);
         if (!Number.isFinite(bet) || bet < 500 || bet > 100000) return socket.emit('gatokaca_error', { message: 'Taruhan harus antara 500 sampai 100.000 koin' });
 
