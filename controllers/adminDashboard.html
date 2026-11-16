@@ -625,6 +625,7 @@
   <div class="nav-tabs">
     <button class="nav-tab active" id="tabUsersBtn" onclick="switchTab('users')">👥 Kelola Pemain & Kunci Slot</button>
     <button class="nav-tab" id="tabLogsBtn" onclick="switchTab('logs')">📊 Audit Log Sumber Koin (Semua Game)</button>
+    <button class="nav-tab" id="tabVersionBtn" onclick="switchTab('version')">⚙️ Kontrol Versi & Force Update</button>
   </div>
 
   <div class="stats-grid">
@@ -719,6 +720,84 @@
           <tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 40px;">Pilih filter dan klik Muat Log...</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- TAB 3: SYSTEM VERSION & FORCE UPDATE -->
+  <div id="sectionVersion" style="display: none;">
+    <div style="background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 24px; max-width: 800px; margin: 0 auto;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+        <div>
+          <h3 style="margin: 0; font-size: 18px; color: var(--gold);">⚙️ Kontrol Versi & Pembaruan Wajib (Force Update)</h3>
+          <p style="margin: 4px 0 0; font-size: 13px; color: var(--text-dim);">
+            Atur versi minimal yang diizinkan untuk bermain. Pemain dengan versi usang akan langsung diblokir dari semua game dan diwajibkan update / refresh.
+          </p>
+        </div>
+        <button class="btn btn-blue" onclick="loadVersionConfig()">🔄 Cek Status</button>
+      </div>
+
+      <!-- Current Active Status Card -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 24px;">
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px;">
+          <div style="font-size: 12px; color: var(--text-dim);">Versi Web Aktif</div>
+          <div style="font-size: 20px; font-weight: 800; color: #ffd700;" id="statusWebVersion">2.80</div>
+          <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;" id="statusWebForce">Wajib Refresh: ✅ Aktif</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px;">
+          <div style="font-size: 12px; color: var(--text-dim);">Versi Aplikasi APK Aktif</div>
+          <div style="font-size: 20px; font-weight: 800; color: #38bdf8;" id="statusAppVersion">2.80</div>
+          <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;" id="statusAppForce">Wajib Update: ✅ Aktif</div>
+        </div>
+      </div>
+
+      <form id="versionForm" onsubmit="handleSaveVersion(event)">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px;">
+          <div>
+            <label style="display: block; font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 6px;">
+              🌐 Versi Web Minimum (Contoh: 2.80)
+            </label>
+            <input type="text" id="inputMinWebVersion" class="search-input" style="width: 100%; box-sizing: border-box;" required placeholder="2.80">
+            <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 4px;">Pemain di browser web dengan versi di bawah ini akan dipaksa me-refresh.</span>
+          </div>
+
+          <div>
+            <label style="display: block; font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 6px;">
+              📱 Versi APK Android Minimum (Contoh: 2.80)
+            </label>
+            <input type="text" id="inputMinAppVersion" class="search-input" style="width: 100%; box-sizing: border-box;" required placeholder="2.80">
+            <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 4px;">Pemain di aplikasi HP dengan versi di bawah ini wajib download APK baru.</span>
+          </div>
+        </div>
+
+        <div style="margin-bottom: 18px;">
+          <label style="display: block; font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 6px;">
+            🔗 URL Halaman Unduh APK (Download URL)
+          </label>
+          <input type="text" id="inputDownloadUrl" class="search-input" style="width: 100%; box-sizing: border-box;" required placeholder="/download">
+        </div>
+
+        <div style="display: flex; gap: 24px; margin-bottom: 18px; flex-wrap: wrap;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #fff; cursor: pointer;">
+            <input type="checkbox" id="checkForceWeb" style="width: 18px; height: 18px;" checked>
+            <span>Paksa Update Web (Kunci Game & Wajibkan Refresh)</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #fff; cursor: pointer;">
+            <input type="checkbox" id="checkForceApp" style="width: 18px; height: 18px;" checked>
+            <span>Paksa Update APK (Kunci Game & Wajibkan Download APK)</span>
+          </label>
+        </div>
+
+        <div style="margin-bottom: 22px;">
+          <label style="display: block; font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 6px;">
+            📢 Pesan Pembaruan untuk Pemain
+          </label>
+          <textarea id="inputUpdateMessage" rows="3" class="search-input" style="width: 100%; box-sizing: border-box; resize: vertical;" placeholder="Pembaruan sistem terbaru telah dirilis..."></textarea>
+        </div>
+
+        <button type="submit" id="btnSaveVersion" class="btn btn-gold" style="width: 100%; padding: 14px; font-size: 15px; font-weight: 800;">
+          📢 Rilis & Terapkan Pembaruan (Siarkan ke Seluruh Pemain)
+        </button>
+      </form>
     </div>
   </div>
 
@@ -818,9 +897,12 @@
       activeTab = tab;
       document.getElementById('tabUsersBtn').classList.toggle('active', tab === 'users');
       document.getElementById('tabLogsBtn').classList.toggle('active', tab === 'logs');
+      document.getElementById('tabVersionBtn').classList.toggle('active', tab === 'version');
       document.getElementById('sectionUsers').style.display = tab === 'users' ? 'block' : 'none';
       document.getElementById('sectionLogs').style.display = tab === 'logs' ? 'block' : 'none';
+      document.getElementById('sectionVersion').style.display = tab === 'version' ? 'block' : 'none';
       if (tab === 'logs') loadGlobalLogs();
+      if (tab === 'version') loadVersionConfig();
     }
 
     function handleAvatarError(img) {
@@ -1407,6 +1489,79 @@
       logSearchTimeout = setTimeout(() => {
         loadGlobalLogs();
       }, 350);
+    }
+
+    async function loadVersionConfig() {
+      try {
+        const res = await adminFetch('/api/system/version');
+        const d = await res.json();
+        if (d && d.success) {
+          const webV = d.minWebVersion || d.webVersion || '2.80';
+          const appV = d.minAppVersion || d.appVersion || '2.80';
+          document.getElementById('statusWebVersion').innerText = webV;
+          document.getElementById('statusAppVersion').innerText = appV;
+          document.getElementById('statusWebForce').innerText = d.forceUpdateWeb !== false ? 'Wajib Refresh: ✅ Aktif' : 'Wajib Refresh: ❌ Nonaktif';
+          document.getElementById('statusAppForce').innerText = d.forceUpdateApp !== false ? 'Wajib Update: ✅ Aktif' : 'Wajib Update: ❌ Nonaktif';
+
+          document.getElementById('inputMinWebVersion').value = webV;
+          document.getElementById('inputMinAppVersion').value = appV;
+          document.getElementById('inputDownloadUrl').value = d.downloadUrl || '/download';
+          document.getElementById('checkForceWeb').checked = d.forceUpdateWeb !== false;
+          document.getElementById('checkForceApp').checked = d.forceUpdateApp !== false;
+          document.getElementById('inputUpdateMessage').value = d.updateMessage || '';
+        }
+      } catch (err) {
+        console.error('Error loadVersionConfig:', err);
+      }
+    }
+
+    async function handleSaveVersion(e) {
+      e.preventDefault();
+      const minWeb = document.getElementById('inputMinWebVersion').value.trim();
+      const minApp = document.getElementById('inputMinAppVersion').value.trim();
+      const downloadUrl = document.getElementById('inputDownloadUrl').value.trim();
+      const forceWeb = document.getElementById('checkForceWeb').checked;
+      const forceApp = document.getElementById('checkForceApp').checked;
+      const msg = document.getElementById('inputUpdateMessage').value.trim();
+
+      const confirmText = '📢 KONFIRMASI RILIS PEMBARUAN!\\n\\n' +
+        'Versi Web: ' + minWeb + ' (Wajib: ' + (forceWeb ? 'YA' : 'TIDAK') + ')\\n' +
+        'Versi APK: ' + minApp + ' (Wajib: ' + (forceApp ? 'YA' : 'TIDAK') + ')\\n\\n' +
+        'Pemain yang membuka versi lama akan LANGSUNG DIKUNCI dari semua game dan diwajibkan update / refresh.\\n\\nLanjutkan?';
+
+      if (!confirm(confirmText)) return;
+
+      const btn = document.getElementById('btnSaveVersion');
+      btn.disabled = true;
+      btn.innerText = 'Menyimpan & Menyiarkan...';
+
+      try {
+        const res = await adminFetch('/api/admin/system/version', {
+          method: 'POST',
+          body: JSON.stringify({
+            webVersion: minWeb,
+            minWebVersion: minWeb,
+            appVersion: minApp,
+            minAppVersion: minApp,
+            downloadUrl: downloadUrl,
+            forceUpdateWeb: forceWeb,
+            forceUpdateApp: forceApp,
+            updateMessage: msg
+          })
+        });
+        const d = await res.json();
+        if (d && d.success) {
+          showToast('🎉 Pengaturan versi berhasil disimpan & disiarkan ke semua pemain!');
+          loadVersionConfig();
+        } else {
+          alert('Gagal: ' + (d.error || 'Server error'));
+        }
+      } catch (err) {
+        if (err.message !== 'Unauthorized') alert('Kesalahan: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '📢 Rilis & Terapkan Pembaruan (Siarkan ke Seluruh Pemain)';
+      }
     }
 
     window.onload = () => checkAuthStatus();

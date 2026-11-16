@@ -31,6 +31,7 @@ const bonusController = require('./controllers/bonusController');
 const shopController = require('./controllers/shopController');
 const transferController = require('./controllers/transferController');
 const adminController = require('./controllers/adminController');
+const systemController = require('./controllers/systemController');
 const { initSocketIO } = require('./gameManager');
 
 const app = express();
@@ -46,6 +47,7 @@ const io = new Server(server, {
     methods: ['GET', 'POST']
   }
 });
+app.set('io', io);
 
 // Security Middlewares
 const helmet = require('helmet');
@@ -147,6 +149,10 @@ app.post('/api/admin/adjust-coins',                adminController.requireAdminA
 app.post('/api/admin/toggle-slot-lock',            adminController.requireAdminAuth, adminController.toggleSlotLock);
 app.post('/api/admin/delete-user',                 adminController.requireAdminAuth, adminController.deleteUser);
 app.get('/api/admin/coin-logs',                    adminController.requireAdminAuth, adminController.getCoinLogs);
+
+// System & Version routes (Public & Admin)
+app.get('/api/system/version',                     systemController.getVersion);
+app.post('/api/admin/system/version',              adminController.requireAdminAuth, systemController.updateVersion);
 
 // Initialize Socket.IO game events
 initSocketIO(io);
